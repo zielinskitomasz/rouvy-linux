@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fake gnome-session-inhibit: holds for as long as the wrapped command runs, like the real one.
+# With "fail" in $STUB_STATE/gnome it exits at once, as the real one does outside GNOME.
+echo "gnome-session-inhibit $*" >>"$STUB_STATE/calls"
+if [[ $(cat "$STUB_STATE/gnome" 2>/dev/null) == fail ]]; then exit 1; fi
+while [[ ${1:-} == --* ]]; do
+  case $1 in
+    --app-id | --reason | --inhibit) shift 2 ;;
+    *) shift ;;
+  esac
+done
+exec "$@"

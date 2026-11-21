@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shell scripts
+        run: shellcheck -x rouvy install.sh tests/smoke.sh tests/helper.bash tests/stubs/*
+
+      - name: Python
+        run: python3 -m py_compile lib/vm-monitor.py tests/test_vm_monitor.py
+
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem shared/setup/*.ps1 | ForEach-Object {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            if ($errors) { $failed = $true; $errors | ForEach-Object { Write-Output "$($_.Extent.File):$($_.Extent.StartLineNumber) $($_.Message)" } }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Compose file
+        run: docker compose --env-file rouvy.conf.example config --quiet
+
+  # The launcher leans on bash, coreutils and util-linux, which differ between releases (GNU
+  # coreutils up to 24.04, the Rust rewrite after it), so the suites run on each of them with
+  # that release's own bats. "rolling" is whatever Ubuntu released last.
+  test:
+    name: test (ubuntu ${{ matrix.ubuntu }})
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["20.04", "22.04", "24.04", "26.04", "rolling"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the test tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends bats python3 procps desktop-file-utils
+
+      - name: Launcher and installer
+        run: bats tests
+
+      - name: QEMU monitor client
+        run: python3 -W error -m unittest discover -s tests -v

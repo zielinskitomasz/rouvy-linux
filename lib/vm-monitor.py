@@ -23,6 +23,12 @@ class Monitor:
         self.sock.connect(SOCKET)
         self._read_until_prompt()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.sock.close()
+
     def _read_until_prompt(self):
         buf = b''
         try:
@@ -60,11 +66,18 @@ def ppm_to_png(ppm):
             + chunk(b'IEND', b''))
 
 
+def is_png(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, 'rb') as image:
+        return image.read(4) == b'\x89PNG'
+
+
 def screendump(monitor, path):
     if os.path.exists(path):
         os.remove(path)
     monitor.command(f'screendump {path} -f png')
-    if os.path.exists(path) and open(path, 'rb').read(4) == b'\x89PNG':
+    if is_png(path):
         return
     # QEMU builds without libpng only write PPM.
     ppm = path + '.ppm'
@@ -76,13 +89,17 @@ def screendump(monitor, path):
 
 def main(argv):
     if len(argv) >= 2 and argv[0] == 'hmp':
-        print(Monitor().command(' '.join(argv[1:])))
+        with Monitor() as monitor:
+            print(monitor.command(' '.join(argv[1:])))
     elif len(argv) == 2 and argv[0] == 'screendump':
-        screendump(Monitor(), argv[1])
+        with Monitor() as monitor:
+            screendump(monitor, argv[1])
     elif argv == ['vnc-clients']:
-        print(len(re.findall(r'^\s*Client:', Monitor().command('info vnc'), re.MULTILINE)))
+        with Monitor() as monitor:
+            print(len(re.findall(r'^\s*Client:', monitor.command('info vnc'), re.MULTILINE)))
     else:
         sys.exit(__doc__)
 
 
-main(sys.argv[1:])
+if __name__ == '__main__':
+    main(sys.argv[1:])

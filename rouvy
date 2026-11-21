@@ -39,6 +39,10 @@ load_conf
 export ROUVY_NAME ROUVY_WEB_PORT ROUVY_RDP_PORT ROUVY_SSH_PORT
 
 readonly CONTAINER=$ROUVY_NAME-windows
+# The settings below exist for the test suite: fake devices and a faster watcher.
+readonly USB_SYSFS=${ROUVY_USB_SYSFS:-/sys/bus/usb/devices}
+readonly KVM_DEVICE=${ROUVY_KVM_DEVICE:-/dev/kvm}
+readonly WATCH_INTERVAL=${ROUVY_WATCH_INTERVAL:-20}
 readonly SETUP=$ROOT/shared/setup
 readonly RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/rouvy-$ROUVY_NAME
 readonly SCREEN_URL=http://127.0.0.1:$ROUVY_WEB_PORT/
@@ -149,7 +153,7 @@ monitor_ready() { docker exec "$CONTAINER" test -S /run/shm/monitor.sock 2>/dev/
 bt_select() {
   local dev vid pid intf ids="" matches=()
   [[ $ROUVY_BT != off ]] || return 1
-  for dev in /sys/bus/usb/devices/*; do
+  for dev in "$USB_SYSFS"/*; do
     [[ -f $dev/idVendor ]] || continue
     vid=$(<"$dev/idVendor") pid=$(<"$dev/idProduct")
     if [[ $ROUVY_BT == *:* ]]; then
@@ -195,6 +199,15 @@ bt_owner() {
 
 bt_owned_by() { [[ $(bt_owner) == "$1" ]]; }
 
+# Prints "MAC name" for every device that is connected to Linux over Bluetooth right now.
+bt_host_connections() {
+  local mac name
+  command -v bluetoothctl >/dev/null || return 0
+  while read -r _ mac name; do
+    if timeout 5 bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes'; then echo "$mac $name"; fi
+  done < <(timeout 5 bluetoothctl devices 2>/dev/null)
+}
+
 bt_attach() {
   bt_select || {
     warn "no USB Bluetooth adapter found, Rouvy will not see BLE trainers"
@@ -204,6 +217,14 @@ bt_attach() {
     info "Bluetooth: $(bt_name) already belongs to the VM"
     return 0
   fi
+  # A device that loses its link without warning keeps calling the adapter's address. Windows
+  # then answers without its keys and some devices forget the pairing, so everything connected
+  # to Linux gets a clean disconnect before the adapter leaves.
+  local mac name
+  while read -r mac name; do
+    timeout 10 bluetoothctl disconnect "$mac" >/dev/null 2>&1 || true
+    info "Bluetooth: disconnected $name from Linux"
+  done < <(bt_host_connections)
   if [[ $(monitor hmp info usb) == *"ID: bt0"* ]]; then
     monitor hmp device_del bt0 >/dev/null
     sleep 1
@@ -352,8 +373,10 @@ cmd_watch() {
   echo $$ >"$RUN_DIR/watch.pid"
   trap 'inhibitor_stop; rm -f "$RUN_DIR/watch.pid"' EXIT
   trap 'exit 0' TERM INT
-  while container_running; do
-    state=$(ride_in_progress)
+  # Everything the loop starts gets fd 9 closed: a probe that outlives a killed watcher (timeout
+  # moves it into its own process group) would otherwise keep the lock and block the next watcher.
+  while container_running 9>&-; do
+    state=$(ride_in_progress 9>&-)
     if [[ $state == unknown ]]; then
       # One slow answer from a busy VM must not blank the screen in the middle of a ride.
       if ((++unknown < 6)); then state=keep; else state=no; fi
@@ -365,7 +388,7 @@ cmd_watch() {
     elif [[ $state == no ]]; then
       inhibitor_stop
     fi
-    sleep 20 9>&- &
+    sleep "$WATCH_INTERVAL" 9>&- &
     wait $! || true
   done
 }
@@ -420,7 +443,7 @@ cmd_screenshot() {
   mkdir -p "$ROOT/screenshots"
   out=$ROOT/screenshots/$(date +%Y%m%d-%H%M%S).png
   monitor screendump /tmp/screen.png
-  docker cp -q "$CONTAINER:/tmp/screen.png" "$out"
+  docker cp "$CONTAINER:/tmp/screen.png" "$out" >/dev/null 2>&1 || die "could not copy the screenshot out of the VM container"
   echo "$out"
 }
 
@@ -540,7 +563,7 @@ cmd_build() {
   if vm_installed && [[ ! -f $stamp ]]; then
     die "a Windows VM already exists. To rebuild: rouvy stop, delete $ROOT/storage, rouvy build"
   fi
-  [[ -e /dev/kvm ]] || die "/dev/kvm is missing, enable virtualization in the firmware setup"
+  [[ -e $KVM_DEVICE ]] || die "/dev/kvm is missing, enable virtualization in the firmware setup"
 
   mkdir -p "$ROOT"/{storage,ssh} "$SETUP"/{rouvy,drivers} "$RUN_DIR"
   if [[ ! -f $ROOT/ssh/id_ed25519 ]]; then
@@ -620,7 +643,7 @@ cmd_doctor() {
   }
   if docker info >/dev/null 2>&1; then check ok "docker daemon reachable"; else check fail "docker daemon not reachable (installed? in the docker group?)"; fi
   if docker compose version >/dev/null 2>&1; then check ok "docker compose v2"; else check fail "docker compose v2 plugin missing"; fi
-  if [[ -c /dev/kvm ]]; then check ok "/dev/kvm present"; else check fail "/dev/kvm missing (enable VT-x/AMD-V in the firmware setup)"; fi
+  if [[ -c $KVM_DEVICE ]]; then check ok "/dev/kvm present"; else check fail "/dev/kvm missing (enable VT-x/AMD-V in the firmware setup)"; fi
   if [[ -c /dev/net/tun ]]; then check ok "/dev/net/tun present"; else check fail "/dev/net/tun missing (modprobe tun)"; fi
   for tool in ssh ssh-keygen curl setsid flock timeout; do
     if command -v "$tool" >/dev/null; then check ok "$tool"; else check fail "$tool not installed"; fi
@@ -698,6 +721,10 @@ main() {
   esac
 }
 
-# bash reads a script while running it. The explicit exit on the same line keeps a long-lived
-# watcher from executing whatever an edit of this file puts after the line it was started from.
-main "$@"; exit
+# Sourcing the file, as the tests do, only defines the functions.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  # bash reads a script while running it. The explicit exit keeps a long-lived watcher from
+  # executing whatever an edit of this file puts after the block it was started from.
+  main "$@"
+  exit
+fi
