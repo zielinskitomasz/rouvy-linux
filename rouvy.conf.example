@@ -1,0 +1,46 @@
+# Copy to rouvy.conf and uncomment what you want to change. Environment variables win over it.
+
+# --- VM hardware (applied on the next start) ---
+# Rouvy renders on the CPU inside the VM, so give it as many threads as you can spare.
+#ROUVY_CPUS=8
+#ROUVY_RAM=8G
+# Size of the Windows disk. It is a sparse file, so it only takes what Windows really uses.
+# It can be raised later, never lowered.
+#ROUVY_DISK=64G
+# Stream the VM's sound to the screen in the browser (Y or N).
+#ROUVY_AUDIO=Y
+
+# --- Windows installation (only read by `rouvy build`) ---
+#ROUVY_LANGUAGE=English
+#ROUVY_REGION=en-US
+#ROUVY_KEYBOARD=en-US
+# Windows time zone name, e.g. "Central European Standard Time" (list: rouvy ssh 'tzutil /l').
+# Empty keeps what Windows picks for the region.
+#ROUVY_TIMEZONE=
+
+# --- Bluetooth ---
+# auto: the only USB Bluetooth adapter. off: never touch Bluetooth. Or vendor:product from lsusb.
+#ROUVY_BT=auto
+# Driver package for Intel adapters, downloaded when Windows has no driver for the adapter.
+#ROUVY_BT_DRIVER_URL=https://downloadmirror.intel.com/930964/BT-24.80.0-64UWD-Win10-Win11.exe
+
+# --- Screen ---
+# auto: a Chromium-based browser in app mode, else the default browser. none: just print the URL.
+# Anything else is run as a command with ROUVY_SCREEN_URL in its environment.
+#ROUVY_VIEWER=auto
+# What keeps the screen awake during a ride. auto: gnome-session-inhibit, else systemd-inhibit.
+# off: nothing. Anything else is run as a command that holds the inhibitor until it is killed,
+# e.g. ROUVY_INHIBIT="kde-inhibit --power --screenSaver sleep infinity"
+#ROUVY_INHIBIT=auto
+
+# --- Rarely needed ---
+#ROUVY_INSTALLER_URL=https://cdn.rouvy.com/update/Rouvy_Installer.exe
+#ROUVY_IMAGE=dockurr/windows:6.05
+# Name prefix of the container, for running a second VM from another checkout.
+#ROUVY_NAME=rouvy
+# All ports listen on 127.0.0.1 only.
+#ROUVY_WEB_PORT=8006
+#ROUVY_RDP_PORT=3389
+#ROUVY_SSH_PORT=2222
+# Seconds `rouvy build` waits for Windows and Rouvy to install.
+#ROUVY_BUILD_TIMEOUT=5400

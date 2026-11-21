@@ -1,0 +1,16 @@
+# Local settings
+/rouvy.conf
+/.env*
+
+# VM state: the Windows disk, the SSH key pair for the VM, screenshots
+/storage/
+/ssh/
+/screenshots/
+
+# The folder shared with Windows holds downloads and logs; only the setup scripts are tracked.
+/shared/*
+!/shared/setup/
+/shared/setup/*
+!/shared/setup/*.ps1
+
+/.old/

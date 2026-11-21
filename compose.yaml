@@ -1,0 +1,42 @@
+# Windows 11 in QEMU/KVM inside a container (https://github.com/dockur/windows).
+# Use ./rouvy instead of calling docker compose directly: it also hands over the Bluetooth
+# adapter, starts Rouvy and opens the screen. Settings come from rouvy.conf (see
+# rouvy.conf.example); with plain compose pass it as --env-file rouvy.conf.
+name: ${ROUVY_NAME:-rouvy}
+
+services:
+  windows:
+    image: ${ROUVY_IMAGE:-dockurr/windows:6.05}
+    container_name: ${ROUVY_NAME:-rouvy}-windows
+    environment:
+      VERSION: "11"
+      LANGUAGE: ${ROUVY_LANGUAGE:-English}
+      REGION: ${ROUVY_REGION:-en-US}
+      KEYBOARD: ${ROUVY_KEYBOARD:-en-US}
+      USERNAME: rouvy
+      PASSWORD: rouvy
+      RAM_SIZE: ${ROUVY_RAM:-8G}
+      CPU_CORES: ${ROUVY_CPUS:-8}
+      DISK_SIZE: ${ROUVY_DISK:-64G}
+      AUDIO: ${ROUVY_AUDIO:-Y}
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    # USB nodes are bind-mounted rather than listed under `devices` so that an adapter which
+    # re-enumerates stays visible; the cgroup rule allows any USB device (char major 189).
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "127.0.0.1:${ROUVY_WEB_PORT:-8006}:8006"
+      - "127.0.0.1:${ROUVY_RDP_PORT:-3389}:3389/tcp"
+      - "127.0.0.1:${ROUVY_RDP_PORT:-3389}:3389/udp"
+      - "127.0.0.1:${ROUVY_SSH_PORT:-2222}:22"
+    volumes:
+      - ./storage:/storage
+      - ./shared:/data
+      - ./oem:/oem
+      - /dev/bus/usb:/dev/bus/usb
+    restart: "no"
+    stop_grace_period: 2m

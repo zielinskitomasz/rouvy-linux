@@ -1,0 +1,703 @@
+#!/usr/bin/env bash
+# Rouvy on Linux: the Windows app in a KVM virtual machine that owns the host's Bluetooth adapter.
+set -euo pipefail
+
+ROOT=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+readonly ROOT
+
+readonly CONF=$ROOT/rouvy.conf
+
+# KEY=value lines, read without executing anything. The environment wins over the file.
+load_conf() {
+  local line key value
+  [[ -f $CONF ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[1]} value=${BASH_REMATCH[2]%$'\r'}
+    if [[ $value =~ ^\"(.*)\"[[:space:]]*$ || $value =~ ^\'(.*)\'[[:space:]]*$ ]]; then
+      value=${BASH_REMATCH[1]}
+    else
+      value=${value%%[[:space:]]#*}
+      value=${value%"${value##*[![:space:]]}"}
+    fi
+    [[ -v $key ]] || export "$key=$value"
+  done <"$CONF"
+}
+load_conf
+
+: "${ROUVY_NAME:=rouvy}"
+: "${ROUVY_WEB_PORT:=8006}"
+: "${ROUVY_RDP_PORT:=3389}"
+: "${ROUVY_SSH_PORT:=2222}"
+: "${ROUVY_BT:=auto}"
+: "${ROUVY_VIEWER:=auto}"
+: "${ROUVY_INHIBIT:=auto}"
+: "${ROUVY_TIMEZONE:=}"
+: "${ROUVY_INSTALLER_URL:=https://cdn.rouvy.com/update/Rouvy_Installer.exe}"
+: "${ROUVY_BT_DRIVER_URL:=https://downloadmirror.intel.com/930964/BT-24.80.0-64UWD-Win10-Win11.exe}"
+: "${ROUVY_BUILD_TIMEOUT:=5400}"
+export ROUVY_NAME ROUVY_WEB_PORT ROUVY_RDP_PORT ROUVY_SSH_PORT
+
+readonly CONTAINER=$ROUVY_NAME-windows
+readonly SETUP=$ROOT/shared/setup
+readonly RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/rouvy-$ROUVY_NAME
+readonly SCREEN_URL=http://127.0.0.1:$ROUVY_WEB_PORT/
+readonly SSH=(ssh -i "$ROOT/ssh/id_ed25519" -p "$ROUVY_SSH_PORT"
+  -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$ROOT/ssh/known_hosts"
+  -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes rouvy@127.0.0.1)
+readonly VM_PROBE="if (Get-Process Rouvy -ErrorAction SilentlyContinue) {'ROUVY=1'} else {'ROUVY=0'}; if (qwinsta | Select-String 'rdp-tcp#.*Active') {'RDP=1'} else {'RDP=0'}; 'VERSION=' + (Get-Item 'C:\Program Files\VirtualTraining\Rouvy\Rouvy.exe' -ErrorAction SilentlyContinue).VersionInfo.ProductVersion"
+BT_VID="" BT_PID="" BT_DEV=""
+INHIBITOR=""
+
+usage() {
+  cat <<EOF
+Usage: rouvy [command]
+
+  start [--no-bt] [--no-launch] [--no-view]
+                    Boot the VM, hand it the Bluetooth adapter, start Rouvy and open the
+                    screen. This is the default command.
+  stop              Shut Windows down. Bluetooth returns to Linux.
+  status            VM, Bluetooth, Rouvy and screen blanking state.
+  view              Open the VM screen again.
+  build             First-time setup: install Windows and Rouvy unattended (about 20 minutes).
+  update [--force]  Install the latest Rouvy release inside the VM.
+  bt attach|detach|check|driver [--force]
+                    Move the Bluetooth adapter, list what Windows sees, install its driver.
+  ssh [command]     Run PowerShell inside the VM.
+  screenshot        Save a PNG of the VM screen to screenshots/.
+  monitor <cmd>     Send a raw command to the QEMU monitor, e.g. 'info usb'.
+  logs              Follow the VM container log.
+  doctor            Check that this host can run the VM.
+
+Settings live in $CONF (see rouvy.conf.example).
+EOF
+}
+
+info() { echo "$*"; }
+warn() { echo "warning: $*" >&2; }
+
+# Started from the desktop launcher there is no terminal, so progress goes to notifications.
+notify() {
+  if [[ ! -t 1 ]] && command -v notify-send >/dev/null; then
+    notify-send -a Rouvy -i "$ROOT/assets/rouvy-linux.svg" Rouvy "$1" || true
+  fi
+}
+
+die() {
+  echo "error: $*" >&2
+  notify "$*"
+  exit 1
+}
+
+need() {
+  local tool
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null || die "'$tool' is required but not installed"
+  done
+}
+
+# Naming the settings file explicitly keeps compose from also picking up a stray dotenv file.
+compose() {
+  local settings=/dev/null
+  if [[ -f $CONF ]]; then settings=$CONF; fi
+  docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$settings" "$@"
+}
+
+container_running() {
+  [[ $(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null) == true ]]
+}
+
+# dockur creates windows.boot once the unattended Windows installation has finished.
+vm_installed() { [[ -f $ROOT/storage/windows.boot ]]; }
+
+monitor() { docker exec -i "$CONTAINER" python3 - "$@" <"$ROOT/lib/vm-monitor.py"; }
+
+vm_ssh() { "${SSH[@]}" "$@"; }
+
+# vm_ps <timeout seconds> <script in shared/setup> [arguments]
+vm_ps() {
+  local limit=$1 script=$2
+  shift 2
+  timeout "$limit" "${SSH[@]}" \
+    "powershell -NoProfile -ExecutionPolicy Bypass -File '\\\\host.lan\\Data\\setup\\$script' $*; exit \$LASTEXITCODE"
+}
+
+# shellcheck disable=SC2317,SC2329  # called through wait_until
+ssh_ready() { timeout 10 "${SSH[@]}" hostname >/dev/null 2>&1; }
+
+# Prints ROUVY=0|1, RDP=0|1 and VERSION=<installed Rouvy version>, one per line.
+vm_probe() { timeout 15 "${SSH[@]}" "$VM_PROBE" 2>/dev/null | tr -d '\r'; }
+
+alive() { [[ -n ${1:-} ]] && kill -0 "$1" 2>/dev/null; }
+
+# wait_until <seconds> <command...>
+wait_until() {
+  local deadline=$((SECONDS + $1))
+  shift
+  until "$@"; do
+    ((SECONDS < deadline)) || return 1
+    sleep 2
+  done
+}
+
+# shellcheck disable=SC2317,SC2329  # called through wait_until
+monitor_ready() { docker exec "$CONTAINER" test -S /run/shm/monitor.sock 2>/dev/null; }
+
+# --- Bluetooth -------------------------------------------------------------------------------
+
+# Sets BT_VID, BT_PID and BT_DEV (sysfs path). Returns 1 when there is no adapter to hand over.
+bt_select() {
+  local dev vid pid intf ids="" matches=()
+  [[ $ROUVY_BT != off ]] || return 1
+  for dev in /sys/bus/usb/devices/*; do
+    [[ -f $dev/idVendor ]] || continue
+    vid=$(<"$dev/idVendor") pid=$(<"$dev/idProduct")
+    if [[ $ROUVY_BT == *:* ]]; then
+      if [[ ${ROUVY_BT,,} == "$vid:$pid" ]]; then
+        matches+=("$vid $pid $dev")
+        ids+=" $vid:$pid"
+      fi
+      continue
+    fi
+    for intf in "$dev"/*:*; do
+      [[ -f $intf/bInterfaceClass ]] || continue
+      # USB class e0/01/01 is a Bluetooth controller, whichever driver holds it right now.
+      if [[ $(<"$intf/bInterfaceClass")$(<"$intf/bInterfaceSubClass")$(<"$intf/bInterfaceProtocol") == e00101 ]]; then
+        matches+=("$vid $pid $dev")
+        ids+=" $vid:$pid"
+        break
+      fi
+    done
+  done
+  case ${#matches[@]} in
+    0) return 1 ;;
+    1) read -r BT_VID BT_PID BT_DEV <<<"${matches[0]}" ;;
+    *) die "several Bluetooth adapters found, set ROUVY_BT=vendor:product in rouvy.conf:$ids" ;;
+  esac
+}
+
+bt_name() {
+  local name
+  name=$(cat "$BT_DEV/product" 2>/dev/null) ||
+    name=$(lsusb -d "$BT_VID:$BT_PID" 2>/dev/null | sed -n '1s/.* ID [0-9a-f:]* //p')
+  echo "${name:-USB Bluetooth adapter} ($BT_VID:$BT_PID)"
+}
+
+# btusb = Linux owns the adapter, usbfs = QEMU (the VM) owns it.
+bt_owner() {
+  local link
+  link=$(readlink "$BT_DEV/${BT_DEV##*/}:1.0/driver" 2>/dev/null) || {
+    echo none
+    return 0
+  }
+  basename "$link"
+}
+
+bt_owned_by() { [[ $(bt_owner) == "$1" ]]; }
+
+bt_attach() {
+  bt_select || {
+    warn "no USB Bluetooth adapter found, Rouvy will not see BLE trainers"
+    return 1
+  }
+  if bt_owned_by usbfs; then
+    info "Bluetooth: $(bt_name) already belongs to the VM"
+    return 0
+  fi
+  if [[ $(monitor hmp info usb) == *"ID: bt0"* ]]; then
+    monitor hmp device_del bt0 >/dev/null
+    sleep 1
+  fi
+  monitor hmp device_add "usb-host,vendorid=0x$BT_VID,productid=0x$BT_PID,id=bt0" >/dev/null
+  if ! wait_until 10 bt_owned_by usbfs; then
+    # QEMU only knows the USB devices that existed when it started and the adapter
+    # re-enumerates every time it changes owner, so a second attach needs a fresh VM.
+    warn "QEMU cannot see the adapter any more. Restart the VM: rouvy stop && rouvy start"
+    return 1
+  fi
+  info "Bluetooth: $(bt_name) handed to the VM (Linux has no Bluetooth until 'rouvy stop')"
+}
+
+bt_detach() {
+  bt_select || die "no USB Bluetooth adapter found"
+  if bt_owned_by usbfs; then
+    monitor hmp device_del bt0 >/dev/null
+    wait_until 10 bt_owned_by btusb || warn "the adapter did not come back to Linux yet"
+  fi
+  info "Bluetooth: $(bt_name) belongs to Linux (attaching it again needs 'rouvy stop && rouvy start')"
+}
+
+fetch() {
+  local url=$1 dest=$2 args=(-fL -R --retry 3 -o "$2.part")
+  if [[ -t 1 ]]; then args+=(--progress-bar); else args+=(-sS); fi
+  # Skip the download when the copy we have is as new as the one on the server.
+  if [[ -f $dest ]]; then args+=(-z "$dest"); fi
+  mkdir -p "$(dirname "$dest")"
+  curl "${args[@]}" "$url" || {
+    rm -f "$dest.part"
+    return 1
+  }
+  if [[ -s $dest.part ]]; then mv "$dest.part" "$dest"; else rm -f "$dest.part"; fi
+}
+
+# Windows Update usually installs the adapter's driver by itself. When it has not, Intel's
+# package is fetched for Intel adapters; other vendors' installers go into shared/setup/drivers.
+bt_driver() {
+  local rc=0
+  bt_select || die "no USB Bluetooth adapter found"
+  vm_ps 600 bt-driver.ps1 -UsbId "'$BT_VID:$BT_PID'" "$@" || rc=$?
+  if ((rc == 3)) && [[ $BT_VID == 8087 ]] && ! compgen -G "$SETUP/drivers/*.exe" >/dev/null; then
+    info "Downloading the Intel Bluetooth driver..."
+    fetch "$ROUVY_BT_DRIVER_URL" "$SETUP/drivers/${ROUVY_BT_DRIVER_URL##*/}" ||
+      die "download failed: $ROUVY_BT_DRIVER_URL (put a driver installer into shared/setup/drivers/)"
+    rc=0
+    vm_ps 600 bt-driver.ps1 -UsbId "'$BT_VID:$BT_PID'" "$@" || rc=$?
+  fi
+  return "$rc"
+}
+
+cmd_bt() {
+  need docker ssh
+  case ${1:-} in
+    attach)
+      container_running || die "the VM is not running"
+      bt_attach
+      ;;
+    detach)
+      container_running || die "the VM is not running"
+      bt_detach
+      ;;
+    check)
+      if bt_select; then vm_ps 120 bt-check.ps1 -UsbId "'$BT_VID:$BT_PID'"; else vm_ps 120 bt-check.ps1; fi
+      ;;
+    driver)
+      if [[ ${2:-} == --force ]]; then bt_driver -Force; else bt_driver; fi
+      ;;
+    *) die "usage: rouvy bt attach|detach|check|driver [--force]" ;;
+  esac
+}
+
+# --- screen blanking -------------------------------------------------------------------------
+
+# Prints yes, no or unknown. The screen is kept awake only while Rouvy runs and somebody has
+# the VM screen open, so a forgotten VM does not stop the laptop from locking or suspending.
+ride_in_progress() {
+  local state viewers
+  state=$(vm_probe) || state=""
+  case $state in
+    *ROUVY=0*) echo no ;;
+    *ROUVY=1*RDP=1*) echo yes ;;
+    *ROUVY=1*)
+      if viewers=$(monitor vnc-clients 2>/dev/null) && [[ $viewers =~ ^[0-9]+$ ]]; then
+        if ((viewers > 0)); then echo yes; else echo no; fi
+      else
+        echo unknown
+      fi
+      ;;
+    *) echo unknown ;;
+  esac
+}
+
+# Starts a process that blocks idle actions for as long as it lives; its pid lands in INHIBITOR.
+inhibitor_start() {
+  local reason="Rouvy ride in progress" method methods=()
+  # The inhibitor follows this watcher's pid, so it cannot outlive a watcher that gets killed.
+  local hold=(tail --pid=$$ -f /dev/null)
+  INHIBITOR=""
+  case $ROUVY_INHIBIT in
+    off) return 1 ;;
+    auto)
+      if command -v gnome-session-inhibit >/dev/null; then methods+=(gnome); fi
+      if command -v systemd-inhibit >/dev/null; then methods+=(systemd); fi
+      ;;
+    *) methods+=(custom) ;;
+  esac
+  for method in "${methods[@]}"; do
+    # setsid gives the inhibitor its own process group so that stopping it takes its child too;
+    # fd 9 is the watcher's lock and must not leak into it.
+    case $method in
+      gnome) setsid gnome-session-inhibit --app-id rouvy --reason "$reason" \
+        --inhibit idle --inhibit suspend "${hold[@]}" >/dev/null 2>&1 9>&- & ;;
+      systemd) setsid systemd-inhibit --what=idle:sleep --who=rouvy --why="$reason" \
+        "${hold[@]}" >/dev/null 2>&1 9>&- & ;;
+      custom) setsid bash -c "$ROUVY_INHIBIT" >/dev/null 2>&1 9>&- & ;;
+    esac
+    INHIBITOR=$!
+    sleep 1
+    # gnome-session-inhibit exits at once outside a GNOME session; then the next method is tried.
+    if alive "$INHIBITOR"; then
+      echo "$method" >"$RUN_DIR/inhibited"
+      echo "$(date +%T) screen blanking inhibited ($method)"
+      return 0
+    fi
+  done
+  INHIBITOR=""
+  return 1
+}
+
+inhibitor_stop() {
+  rm -f "$RUN_DIR/inhibited"
+  if [[ -n $INHIBITOR ]]; then
+    kill -- "-$INHIBITOR" 2>/dev/null || kill "$INHIBITOR" 2>/dev/null || true
+    echo "$(date +%T) screen blanking back to normal"
+    INHIBITOR=""
+  fi
+}
+
+cmd_watch() {
+  local state unknown=0
+  mkdir -p "$RUN_DIR"
+  exec 9>"$RUN_DIR/watch.lock"
+  flock -n 9 || exit 0
+  echo $$ >"$RUN_DIR/watch.pid"
+  trap 'inhibitor_stop; rm -f "$RUN_DIR/watch.pid"' EXIT
+  trap 'exit 0' TERM INT
+  while container_running; do
+    state=$(ride_in_progress)
+    if [[ $state == unknown ]]; then
+      # One slow answer from a busy VM must not blank the screen in the middle of a ride.
+      if ((++unknown < 6)); then state=keep; else state=no; fi
+    else
+      unknown=0
+    fi
+    if [[ $state == yes ]] && ! alive "$INHIBITOR"; then
+      inhibitor_start || true
+    elif [[ $state == no ]]; then
+      inhibitor_stop
+    fi
+    sleep 20 9>&- &
+    wait $! || true
+  done
+}
+
+watch_start() {
+  [[ $ROUVY_INHIBIT != off ]] || return 0
+  mkdir -p "$RUN_DIR"
+  setsid -f "$ROOT/rouvy" _watch >>"$RUN_DIR/watch.log" 2>&1 </dev/null
+}
+
+# The watcher leads its own process group (setsid), so this also ends a probe that is in flight
+# and still holds the watcher's lock.
+watch_stop() {
+  local pid
+  if pid=$(cat "$RUN_DIR/watch.pid" 2>/dev/null); then
+    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  fi
+}
+
+screen_inhibited() { [[ -f $RUN_DIR/inhibited ]] && alive "$(cat "$RUN_DIR/watch.pid" 2>/dev/null)"; }
+
+# --- screen ----------------------------------------------------------------------------------
+
+open_detached() { setsid -f "$@" >/dev/null 2>&1 </dev/null; }
+
+cmd_view() {
+  local browser
+  case $ROUVY_VIEWER in
+    none) info "Screen: $SCREEN_URL" ;;
+    auto)
+      # App mode gives a window without tabs or address bar.
+      for browser in google-chrome google-chrome-stable chromium chromium-browser brave-browser microsoft-edge; do
+        if command -v "$browser" >/dev/null; then
+          open_detached "$browser" "--app=$SCREEN_URL"
+          return 0
+        fi
+      done
+      if command -v xdg-open >/dev/null; then
+        open_detached xdg-open "$SCREEN_URL"
+      else
+        info "Open $SCREEN_URL in a browser"
+      fi
+      ;;
+    *) ROUVY_SCREEN_URL=$SCREEN_URL open_detached bash -c "$ROUVY_VIEWER" ;;
+  esac
+}
+
+cmd_screenshot() {
+  local out
+  need docker
+  container_running || die "the VM is not running"
+  mkdir -p "$ROOT/screenshots"
+  out=$ROOT/screenshots/$(date +%Y%m%d-%H%M%S).png
+  monitor screendump /tmp/screen.png
+  docker cp -q "$CONTAINER:/tmp/screen.png" "$out"
+  echo "$out"
+}
+
+# --- lifecycle -------------------------------------------------------------------------------
+
+launch_rouvy() { vm_ps 90 rouvy-launch.ps1; }
+
+cmd_start() {
+  local bt=1 launch=1 view=1 arg
+  for arg in "$@"; do
+    case $arg in
+      --no-bt) bt=0 ;;
+      --no-launch) launch=0 ;;
+      --no-view) view=0 ;;
+      *) die "unknown option for start: $arg" ;;
+    esac
+  done
+  need docker ssh setsid flock timeout
+  vm_installed || die "there is no Windows VM yet, run: rouvy build"
+
+  if container_running; then
+    info "The VM is already running"
+  else
+    notify "Starting the Windows VM..."
+    compose up -d
+  fi
+  wait_until 60 monitor_ready || die "the VM did not start, see: rouvy logs"
+
+  # The adapter goes in before Windows boots: QEMU can only attach what existed at its start.
+  local have_bt=0
+  if ((bt)) && [[ $ROUVY_BT != off ]] && bt_attach; then have_bt=1; fi
+
+  info "Waiting for Windows..."
+  wait_until 240 ssh_ready || die "Windows did not come up, look at $SCREEN_URL"
+  if ((have_bt)); then bt_driver || warn "Bluetooth is not working inside Windows, see: rouvy bt check"; fi
+  if ((launch)); then launch_rouvy || warn "could not start Rouvy, open the screen and start it by hand"; fi
+  watch_start
+  if ((view)); then cmd_view; fi
+  info "Ready. Stop with: rouvy stop"
+  notify "Rouvy is ready"
+}
+
+cmd_stop() {
+  need docker
+  if container_running; then
+    info "Shutting Windows down (can take up to 2 minutes)..."
+    docker stop "$CONTAINER" >/dev/null
+  else
+    info "The VM is not running"
+  fi
+  watch_stop
+  if bt_select; then
+    wait_until 10 bt_owned_by btusb || true
+    info "Bluetooth: $(bt_name) belongs to $(bt_owner_label)"
+  fi
+}
+
+bt_owner_label() {
+  case $(bt_owner) in
+    btusb) echo "Linux" ;;
+    usbfs) echo "the VM" ;;
+    *) echo "nobody (no driver bound)" ;;
+  esac
+}
+
+cmd_status() {
+  local probe version
+  need docker
+  if container_running; then
+    info "VM:         running ($(docker ps --filter "name=^$CONTAINER\$" --format '{{.Status}}'))"
+  elif vm_installed; then
+    info "VM:         stopped"
+  else
+    info "VM:         not built yet (rouvy build)"
+  fi
+  if bt_select; then
+    info "Bluetooth:  $(bt_name) belongs to $(bt_owner_label)"
+  elif [[ $ROUVY_BT == off ]]; then
+    info "Bluetooth:  switched off (ROUVY_BT=off)"
+  else
+    info "Bluetooth:  no USB adapter found"
+  fi
+  container_running || return 0
+  if probe=$(vm_probe); then
+    version=$(sed -n 's/^VERSION=//p' <<<"$probe")
+    case $probe in
+      *ROUVY=1*) info "Rouvy:      $version, running" ;;
+      *) info "Rouvy:      ${version:-not installed}, not running" ;;
+    esac
+  else
+    info "Rouvy:      unknown (Windows is not answering yet)"
+  fi
+  info "Viewers:    $(monitor vnc-clients 2>/dev/null || echo unknown) on $SCREEN_URL"
+  if screen_inhibited; then
+    info "Screen:     blanking and auto-suspend inhibited"
+  else
+    info "Screen:     normal blanking (inhibited only while Rouvy runs and its screen is open)"
+  fi
+}
+
+# --- build and update ------------------------------------------------------------------------
+
+provisioned_since() {
+  [[ -f $SETUP/last-setup.log && $SETUP/last-setup.log -nt $1 ]] && grep -q '=== Done' "$SETUP/last-setup.log"
+}
+
+# The message dockur shows on its web page, e.g. "Downloading Windows 11 (29.0%)".
+build_status() {
+  docker exec "$CONTAINER" cat /run/shm/msg.html 2>/dev/null |
+    sed 's/<[^>]*>//g' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
+}
+
+cmd_build() {
+  local stamp=$SETUP/.build-started logs_pid
+  need docker ssh ssh-keygen curl timeout
+  # The stamp survives an interrupted build, so running build again picks up where it was.
+  if vm_installed && [[ ! -f $stamp ]]; then
+    die "a Windows VM already exists. To rebuild: rouvy stop, delete $ROOT/storage, rouvy build"
+  fi
+  [[ -e /dev/kvm ]] || die "/dev/kvm is missing, enable virtualization in the firmware setup"
+
+  mkdir -p "$ROOT"/{storage,ssh} "$SETUP"/{rouvy,drivers} "$RUN_DIR"
+  if [[ ! -f $ROOT/ssh/id_ed25519 ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C rouvy-vm -f "$ROOT/ssh/id_ed25519"
+  fi
+  cp "$ROOT/ssh/id_ed25519.pub" "$SETUP/authorized_keys"
+  # A fresh Windows gets a fresh host key.
+  rm -f "$ROOT/ssh/known_hosts"
+  printf 'TIMEZONE=%s\n' "$ROUVY_TIMEZONE" >"$SETUP/provision.txt"
+
+  info "Downloading the Rouvy installer..."
+  fetch "$ROUVY_INSTALLER_URL" "$SETUP/rouvy/Rouvy_Installer.exe" || die "download failed: $ROUVY_INSTALLER_URL"
+
+  [[ -f $stamp ]] || touch "$stamp"
+  info "Installing Windows 11. This downloads about 8.5 GB and takes 20 minutes or more."
+  info "You can watch it at $SCREEN_URL"
+  compose up -d
+  docker logs -f --since 1s "$CONTAINER" > >(tr '\r' '\n' | grep --line-buffered -v '^[[:space:]]*$') 2>&1 &
+  logs_pid=$!
+  trap 'kill "$logs_pid" 2>/dev/null || true' EXIT
+  local started=$SECONDS next=0 said=$SECONDS status last=""
+  until provisioned_since "$stamp"; do
+    container_running || die "the VM stopped during the installation, see: docker logs $CONTAINER"
+    ((SECONDS - started < ROUVY_BUILD_TIMEOUT)) ||
+      die "setup did not finish within $((ROUVY_BUILD_TIMEOUT / 60)) minutes, look at $SCREEN_URL (it keeps running)"
+    if ((SECONDS >= next)); then
+      next=$((SECONDS + 60))
+      status=$(build_status) || status=""
+      if [[ -n $status && $status != "$last" ]]; then
+        info "... $status"
+        last=$status said=$SECONDS
+      elif ((SECONDS - said >= 300)); then
+        # Once Windows itself is installing, the container has nothing more to report.
+        info "... $(((SECONDS - started) / 60)) minutes in, still installing"
+        said=$SECONDS
+      fi
+    fi
+    sleep 10
+  done
+  kill "$logs_pid" 2>/dev/null || true
+  trap - EXIT
+  rm -f "$stamp"
+  sed -n '/^=== /p; /FAILED/p; /^Rouvy/p' "$SETUP/last-setup.log" | tr -d '\r'
+
+  # The clock setting made during setup only applies from the next boot.
+  info "Shutting Windows down to finish..."
+  docker stop "$CONTAINER" >/dev/null
+  info "Done. Start riding with: rouvy"
+}
+
+cmd_update() {
+  local args=() was_running=1 rouvy_was_up=0 rc=0
+  if [[ ${1:-} == --force ]]; then args+=(-Force); fi
+  need docker ssh curl timeout
+  vm_installed || die "there is no Windows VM yet, run: rouvy build"
+
+  info "Checking $ROUVY_INSTALLER_URL"
+  fetch "$ROUVY_INSTALLER_URL" "$SETUP/rouvy/Rouvy_Installer.exe" || die "download failed: $ROUVY_INSTALLER_URL"
+
+  if ! container_running; then
+    was_running=0
+    cmd_start --no-bt --no-launch --no-view
+  fi
+  wait_until 240 ssh_ready || die "Windows is not answering"
+  if [[ $(vm_probe) == *ROUVY=1* ]]; then rouvy_was_up=1; fi
+  vm_ps 1200 rouvy-update.ps1 "${args[@]}" || rc=$?
+  if ((rc == 0 && rouvy_was_up)) && [[ $(vm_probe) != *ROUVY=1* ]]; then launch_rouvy || true; fi
+  if ((!was_running)); then cmd_stop; fi
+  return "$rc"
+}
+
+cmd_doctor() {
+  local failed=0 free_gb mem_gb port tool
+  check() { # check <ok|warn|fail> <text>
+    printf '%-5s %s\n' "$1" "$2"
+    if [[ $1 == fail ]]; then failed=1; fi
+  }
+  if docker info >/dev/null 2>&1; then check ok "docker daemon reachable"; else check fail "docker daemon not reachable (installed? in the docker group?)"; fi
+  if docker compose version >/dev/null 2>&1; then check ok "docker compose v2"; else check fail "docker compose v2 plugin missing"; fi
+  if [[ -c /dev/kvm ]]; then check ok "/dev/kvm present"; else check fail "/dev/kvm missing (enable VT-x/AMD-V in the firmware setup)"; fi
+  if [[ -c /dev/net/tun ]]; then check ok "/dev/net/tun present"; else check fail "/dev/net/tun missing (modprobe tun)"; fi
+  for tool in ssh ssh-keygen curl setsid flock timeout; do
+    if command -v "$tool" >/dev/null; then check ok "$tool"; else check fail "$tool not installed"; fi
+  done
+  mem_gb=$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)
+  if ((mem_gb >= 15)); then check ok "$mem_gb GB RAM, $(nproc) CPU threads"; else check warn "$mem_gb GB RAM is tight, lower ROUVY_RAM in rouvy.conf"; fi
+  free_gb=$(df -BG --output=avail "$ROOT" | tail -1 | tr -dc 0-9)
+  if vm_installed; then
+    check ok "Windows VM is built"
+  elif ((free_gb >= 40)); then
+    check ok "$free_gb GB free for the VM disk"
+  else
+    check fail "only $free_gb GB free in $ROOT, the build needs about 40 GB"
+  fi
+  if ! container_running; then
+    for port in "$ROUVY_WEB_PORT" "$ROUVY_RDP_PORT" "$ROUVY_SSH_PORT"; do
+      if [[ -n $(ss -ltnH "sport = :$port" 2>/dev/null) ]]; then check fail "port $port is taken, change it in rouvy.conf"; fi
+    done
+  fi
+  if bt_select; then
+    check ok "Bluetooth: $(bt_name), owned by $(bt_owner_label)"
+  elif [[ $ROUVY_BT == off ]]; then
+    check warn "Bluetooth switched off (ROUVY_BT=off), BLE trainers will not connect"
+  else
+    check warn "no USB Bluetooth adapter found (BLE trainers will not connect)"
+  fi
+  case $ROUVY_INHIBIT in
+    off) check warn "screen blanking inhibitor switched off (ROUVY_INHIBIT=off)" ;;
+    auto)
+      if command -v gnome-session-inhibit >/dev/null; then
+        check ok "screen blanking inhibitor: gnome-session-inhibit"
+      elif command -v systemd-inhibit >/dev/null; then
+        check warn "screen blanking inhibitor: systemd-inhibit (not every desktop honours it, see ROUVY_INHIBIT)"
+      else
+        check warn "no screen blanking inhibitor found, set ROUVY_INHIBIT"
+      fi
+      ;;
+    *) check ok "screen blanking inhibitor: custom command" ;;
+  esac
+  return "$failed"
+}
+
+main() {
+  local cmd=${1:-start}
+  if (($#)); then shift; fi
+  case $cmd in
+    start) cmd_start "$@" ;;
+    stop) cmd_stop ;;
+    status) cmd_status ;;
+    view) cmd_view ;;
+    build) cmd_build ;;
+    update) cmd_update "$@" ;;
+    bt) cmd_bt "$@" ;;
+    ssh)
+      need ssh
+      vm_ssh "$@"
+      ;;
+    screenshot) cmd_screenshot ;;
+    monitor)
+      need docker
+      (($#)) || die "usage: rouvy monitor <command>"
+      monitor hmp "$@"
+      ;;
+    logs)
+      need docker
+      docker logs -f --tail 50 "$CONTAINER"
+      ;;
+    doctor) cmd_doctor ;;
+    _watch) cmd_watch ;;
+    -h | --help | help) usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+# bash reads a script while running it. The explicit exit on the same line keeps a long-lived
+# watcher from executing whatever an edit of this file puts after the line it was started from.
+main "$@"; exit
