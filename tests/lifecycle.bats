@@ -102,6 +102,58 @@ EOF
   refute_called "compose .* up"
 }
 
+@test "start stops a VM it booted when the QEMU monitor never comes up" {
+  vm_built
+  run rouvy_once 'monitor_ready() { return 1; }; cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  [[ $output == *"the VM did not start"* ]]
+  assert_order "docker compose .* up -d" "docker stop rouvy-windows"
+  refute_called "device_add"
+}
+
+@test "start leaves an already running VM alone when its monitor does not answer" {
+  vm_built
+  vm_running
+  run rouvy_once 'monitor_ready() { return 1; }; cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  refute_called "docker stop"
+}
+
+@test "an SSH failure returns Bluetooth and leaves the VM this invocation started running" {
+  vm_built
+  intel_adapter
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_once 'cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  assert_order "device_add" "ssh hostname" "device_del"
+  refute_called "docker stop"
+  [ "$(cat "$STUB_STATE/running")" = true ]
+  [[ $(readlink "$STUB_STATE/sys/3-4/3-4:1.0/driver") == */btusb ]]
+  [[ $output == *"look at http://127.0.0.1:8006/"*"rouvy stop && rouvy"* ]]
+}
+
+@test "an SSH failure detaches Bluetooth acquired by this start on an already running VM" {
+  vm_built
+  vm_running
+  intel_adapter
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_once 'cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  assert_order "device_add" "ssh hostname" "device_del"
+  refute_called "docker stop"
+}
+
+@test "an SSH failure preserves Bluetooth already attached to a running VM" {
+  vm_built
+  vm_running
+  intel_adapter usbfs
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_once 'cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  refute_called "device_del"
+  refute_called "docker stop"
+}
+
 @test "start rejects options it does not know" {
   vm_built
   run rouvy start --fast
@@ -281,6 +333,73 @@ EOF
   run rouvy build
   [ "$status" -eq 0 ]
   [ ! -e "$REPO/shared/setup/.build-started" ]
+}
+
+@test "build reports a guest installer failure and preserves the retry stamp" {
+  provisioning_succeeds
+  sed -i 's/=== Done/=== Provisioning failed/' "$STUB_STATE/on-up"
+  run rouvy build
+  [ "$status" -eq 1 ]
+  [[ $output == *"installing Rouvy in it failed"*"rouvy update"* ]]
+  [ -e "$REPO/shared/setup/.build-started" ]
+}
+
+@test "build keeps its retry stamp if Windows provisioning reports success but SSH fails" {
+  provisioning_succeeds
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_once 'cmd_build'
+  [ "$status" -eq 1 ]
+  [[ $output == *"SSH is unavailable"* ]]
+  [ -e "$REPO/shared/setup/.build-started" ]
+  refute_called "docker stop"
+}
+
+@test "build goes by the latest provisioning run when the transcript holds an older one" {
+  provisioning_succeeds
+  sed -i 's/=== Done (2026) ===/=== Done (2026) ===\\r\\n=== Rouvy (2027) ===\\r\\n=== Provisioning failed (2027) ===/' "$STUB_STATE/on-up"
+  run rouvy build
+  [ "$status" -eq 1 ]
+  [[ $output == *"installing Rouvy in it failed"* ]]
+  refute_called "docker stop"
+}
+
+# With no time left to wait, a build that sees nothing finished yet gives up at its first look.
+@test "starting over after a failed provisioning waits for the new Windows" {
+  provisioning_succeeds
+  sed -i 's/=== Done/=== Provisioning failed/' "$STUB_STATE/on-up"
+  run rouvy build
+  [ "$status" -eq 1 ]
+  run rouvy stop
+  rm -rf "$REPO/storage"
+  printf '#!/usr/bin/env bash\n' >"$STUB_STATE/on-up"
+  ROUVY_BUILD_TIMEOUT=0 run rouvy build
+  [ "$status" -eq 1 ]
+  [[ $output == *"setup did not finish"* ]]
+  [[ $output != *"installing Rouvy in it failed"* ]]
+}
+
+@test "starting over after a failed SSH check waits for the new Windows" {
+  provisioning_succeeds
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_once 'cmd_build'
+  [ "$status" -eq 1 ]
+  run rouvy stop
+  rm -rf "$REPO/storage"
+  printf '#!/usr/bin/env bash\n' >"$STUB_STATE/on-up"
+  ROUVY_BUILD_TIMEOUT=0 run rouvy build
+  [ "$status" -eq 1 ]
+  [[ $output == *"setup did not finish"* ]]
+  [[ $output != *"SSH is unavailable"* ]]
+}
+
+@test "an interrupted build whose VM still runs keeps the log Windows wrote meanwhile" {
+  mkdir -p "$REPO/shared/setup"
+  touch -t 202601010000 "$REPO/shared/setup/.build-started"
+  vm_running
+  printf '=== Done (2026) ===\r\n' >"$REPO/shared/setup/last-setup.log"
+  run rouvy build
+  [ "$status" -eq 0 ]
+  [[ $output == *"Done. Start riding with: rouvy"* ]]
 }
 
 @test "build stops waiting when the VM dies during the installation" {

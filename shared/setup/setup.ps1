@@ -57,13 +57,15 @@ Step 'OpenSSH server (the host drives the VM through it)' {
     Restart-Service sshd
 }
 
-Step 'Rouvy' {
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Share 'rouvy-update.ps1')
-}
-
-Step 'Done' {
-    Get-Date -Format s | Out-File 'C:\OEM\setup.done'
+Write-Output "=== Rouvy ($(Get-Date -Format s)) ==="
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Share 'rouvy-update.ps1')
+$installExitCode = $LASTEXITCODE
+if ($installExitCode -eq 0) {
+    Step 'Done' { Get-Date -Format s | Out-File 'C:\OEM\setup.done' }
+} else {
+    Write-Output "=== Provisioning failed ($(Get-Date -Format s)) ==="
 }
 Stop-Transcript | Out-Null
 # The host waits for this copy to know that provisioning has finished.
 Copy-Item 'C:\OEM\setup.log' (Join-Path $Share 'last-setup.log') -Force -ErrorAction SilentlyContinue
+exit $installExitCode

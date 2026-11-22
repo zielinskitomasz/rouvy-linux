@@ -53,10 +53,18 @@ Windows reads the VM's clock correctly (as UTC) only from the boot after setup, 
 `rouvy build` ends by shutting Windows down. A build that was cut short before that leaves the
 first start with the wrong time. `rouvy ssh Get-Date` shows what Windows thinks the time is.
 
-## "Windows did not come up"
+## "Windows is not answering over SSH yet"
 
-Look at the screen at http://127.0.0.1:8006 and at `rouvy logs`. Most of the time Windows is
-installing updates and just needs a few more minutes. Run `rouvy` again afterwards.
+Windows keeps running, only the Bluetooth adapter went back to Linux. Look at the screen at
+http://127.0.0.1:8006: most of the time Windows is installing updates and just needs a few more
+minutes. When it is idle, restart it so that it gets the adapter again: `rouvy stop && rouvy`.
+
+## "Windows is installed, but installing Rouvy in it failed"
+
+`rouvy build` got Windows installed, only the Rouvy installer did not go through. The setup log
+named in the message says why. Once that is fixed, `rouvy update` installs Rouvy; a second
+`rouvy build` cannot, because Windows runs its setup script only once. Afterwards restart the VM
+once with `rouvy stop`, as a finished build does, so that Windows reads the clock correctly.
 
 ## "docker daemon not reachable" in `rouvy doctor`
 
