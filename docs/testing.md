@@ -33,14 +33,15 @@ coreutils have been the Rust rewrite since 25.10), and the launcher leans on all
 
 ### The laptop it was built on
 
-Intel Core Ultra 7 155H, Ubuntu 26.04 with GNOME on Wayland (kernel 7.0), Docker 29.9 with
+Intel Core Ultra 7 155H, Ubuntu 26.04 LTS with GNOME on Wayland (kernel 7.0), Docker 29.9 with
 Compose 5.7, the built-in Intel AX211 Bluetooth adapter. The VM is Windows 11 Pro 25H2 with
 Rouvy 4.8.4.
 
 Everything runs here, including the two things that need real hardware and a real desktop: the
 hand-over of the Bluetooth adapter and the GNOME idle inhibitor. The smoke test has 17 checks on
-a GNOME desktop, the last one asks GNOME itself whether it sees the inhibitor. A `rouvy build`
-from scratch takes 33 minutes on this machine, 18 of them downloading Windows.
+a GNOME desktop and passes all of them; the extra one asks GNOME itself whether it sees the
+inhibitor. A `rouvy build` from scratch takes 33 minutes on this machine, 18 of them downloading
+Windows.
 
 ### Fresh installs of other distributions
 

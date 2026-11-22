@@ -104,8 +104,8 @@ Windows is installed without a product key. Licensing it is yours to sort out, s
 
 | Linux | What ran there |
 | --- | --- |
-| Ubuntu 26.04, GNOME on Wayland | Everything, on the laptop this was built on: the build, Bluetooth with an Intel AX211, the screen-blanking inhibitor. |
-| Debian 13 | A fresh install: `rouvy build` from scratch, then the end-to-end test (start, Bluetooth hand-over, Rouvy running, stop). |
+| Ubuntu 26.04 LTS, GNOME on Wayland | The laptop this was built on, so everything: `rouvy build` from scratch, the end-to-end test (start, Bluetooth hand-over, Rouvy running, stop) with a real Intel AX211 adapter, and the screen-blanking inhibitor. |
+| Debian 13 | A fresh install: `rouvy build` from scratch, then the same end-to-end test. |
 | Debian 12, Ubuntu 24.04, Arch | Fresh installs: the same end-to-end test. |
 | Fedora 45, openSUSE Tumbleweed | Fresh installs with SELinux enforcing: the same end-to-end test. |
 
