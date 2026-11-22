@@ -68,3 +68,26 @@ teardown() { teardown_sandbox; }
   [ ! -e "$LAUNCHER" ]
   [ -f "$REPO/storage/windows.boot" ]
 }
+
+@test "install and uninstall preserve an unrelated rouvy command" {
+  mkdir -p "$XDG_BIN_HOME"
+  echo "existing command" >"$XDG_BIN_HOME/rouvy"
+  run "$REPO/install.sh"
+  [ "$status" -eq 1 ]
+  [ ! -L "$XDG_BIN_HOME/rouvy" ]
+  [ ! -e "$LAUNCHER" ]
+  run "$REPO/install.sh" --uninstall
+  [ "$status" -eq 0 ]
+  [ "$(cat "$XDG_BIN_HOME/rouvy")" = "existing command" ]
+}
+
+@test "install and uninstall preserve another checkout's launcher" {
+  mkdir -p "$(dirname "$LAUNCHER")"
+  echo 'Exec="/other/rouvy" start' >"$LAUNCHER"
+  run "$REPO/install.sh"
+  [ "$status" -eq 1 ]
+  [ ! -e "$XDG_BIN_HOME/rouvy" ]
+  run "$REPO/install.sh" --uninstall
+  [ "$status" -eq 0 ]
+  grep -Fxq 'Exec="/other/rouvy" start' "$LAUNCHER"
+}

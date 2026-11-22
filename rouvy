@@ -53,6 +53,7 @@ readonly SSH=(ssh -i "$ROOT/ssh/id_ed25519" -p "$ROUVY_SSH_PORT"
   -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes rouvy@127.0.0.1)
 readonly VM_PROBE="if (Get-Process Rouvy -ErrorAction SilentlyContinue) {'ROUVY=1'} else {'ROUVY=0'}; if (qwinsta | Select-String 'rdp-tcp#.*Active') {'RDP=1'} else {'RDP=0'}; 'VERSION=' + (Get-Item 'C:\Program Files\VirtualTraining\Rouvy\Rouvy.exe' -ErrorAction SilentlyContinue).VersionInfo.ProductVersion"
 BT_VID="" BT_PID="" BT_DEV=""
+BT_ATTACH_REQUESTED=0
 INHIBITOR=""
 
 usage() {
@@ -234,6 +235,7 @@ bt_host_connections() {
 }
 
 bt_attach() {
+  BT_ATTACH_REQUESTED=0
   bt_select || {
     warn "no USB Bluetooth adapter found, Rouvy will not see BLE trainers"
     return 1
@@ -251,10 +253,11 @@ bt_attach() {
     info "Bluetooth: disconnected $name from Linux"
   done < <(bt_host_connections)
   if [[ $(monitor hmp info usb) == *"ID: bt0"* ]]; then
-    monitor hmp device_del bt0 >/dev/null
+    monitor hmp device_del bt0 >/dev/null || return 1
     sleep 1
   fi
-  monitor hmp device_add "usb-host,vendorid=0x$BT_VID,productid=0x$BT_PID,id=bt0" >/dev/null
+  BT_ATTACH_REQUESTED=1
+  monitor hmp device_add "usb-host,vendorid=0x$BT_VID,productid=0x$BT_PID,id=bt0" >/dev/null || return 1
   if ! wait_until 10 bt_owned_by usbfs; then
     if selinux_blocks_usb; then
       warn "SELinux blocks USB devices for containers. Allow it once: sudo setsebool -P container_use_devices on"
@@ -271,9 +274,16 @@ bt_attach() {
 
 bt_detach() {
   bt_select || die "no USB Bluetooth adapter found"
+  bt_release
+}
+
+bt_release() {
   if bt_owned_by usbfs; then
-    monitor hmp device_del bt0 >/dev/null
-    wait_until 10 bt_with_linux || warn "the adapter did not come back to Linux yet"
+    monitor hmp device_del bt0 >/dev/null || warn "QEMU did not confirm the Bluetooth detach"
+  fi
+  if ! wait_until 10 bt_with_linux; then
+    warn "Bluetooth did not return to Linux: $(bt_name) belongs to $(bt_owner_label)"
+    return 1
   fi
   info "Bluetooth: $(bt_name) belongs to Linux (attaching it again needs 'rouvy stop && rouvy start')"
 }
@@ -482,7 +492,8 @@ cmd_screenshot() {
 launch_rouvy() { vm_ps 90 rouvy-launch.ps1; }
 
 cmd_start() {
-  local bt=1 launch=1 view=1 arg
+  local bt=1 launch=1 view=1 arg started_vm=0 have_bt=0
+  BT_ATTACH_REQUESTED=0
   for arg in "$@"; do
     case $arg in
       --no-bt) bt=0 ;;
@@ -499,15 +510,30 @@ cmd_start() {
   else
     notify "Starting the Windows VM..."
     vm_up
+    started_vm=1
   fi
-  wait_until 60 monitor_ready || die "the VM did not start, see: rouvy logs"
+  if ! wait_until 60 monitor_ready; then
+    if ((started_vm)) && container_running; then
+      docker stop "$CONTAINER" >/dev/null || warn "could not stop the VM"
+    fi
+    die "the VM did not start, see: rouvy logs"
+  fi
 
   # The adapter goes in before Windows boots: QEMU can only attach what existed at its start.
-  local have_bt=0
   if ((bt)) && [[ $ROUVY_BT != off ]] && bt_attach; then have_bt=1; fi
 
   info "Waiting for Windows..."
-  wait_until 240 ssh_ready || die "Windows did not come up, look at $SCREEN_URL"
+  if ! wait_until 240 ssh_ready; then
+    if ((started_vm)); then
+      if container_running; then docker stop "$CONTAINER" >/dev/null || warn "could not stop the VM"; fi
+      if ((BT_ATTACH_REQUESTED)) && ! wait_until 10 bt_with_linux; then
+        warn "Bluetooth did not return to Linux: $(bt_name) belongs to $(bt_owner_label)"
+      fi
+    elif ((BT_ATTACH_REQUESTED)) && bt_owned_by usbfs; then
+      bt_release || true
+    fi
+    die "Windows did not answer over SSH. See: rouvy logs"
+  fi
   if ((have_bt)); then bt_driver || warn "Bluetooth is not working inside Windows, see: rouvy bt check"; fi
   if ((launch)); then launch_rouvy || warn "could not start Rouvy, open the screen and start it by hand"; fi
   watch_start
@@ -577,7 +603,8 @@ cmd_status() {
 # --- build and update ------------------------------------------------------------------------
 
 provisioned_since() {
-  [[ -f $SETUP/last-setup.log && $SETUP/last-setup.log -nt $1 ]] && grep -q '=== Done' "$SETUP/last-setup.log"
+  [[ -f $SETUP/last-setup.log && $SETUP/last-setup.log -nt $1 ]] &&
+    grep -q "^=== $2 " "$SETUP/last-setup.log"
 }
 
 # The message dockur shows on its web page, e.g. "Downloading Windows 11 (29.0%)".
@@ -615,7 +642,10 @@ cmd_build() {
   logs_pid=$!
   trap 'kill "$logs_pid" 2>/dev/null || true' EXIT
   local started=$SECONDS next=0 said=$SECONDS status last=""
-  until provisioned_since "$stamp"; do
+  until provisioned_since "$stamp" Done; do
+    if provisioned_since "$stamp" 'Provisioning failed'; then
+      die "Windows provisioning failed, see: $SETUP/last-setup.log"
+    fi
     container_running || die "the VM stopped during the installation, see: docker logs $CONTAINER"
     ((SECONDS - started < ROUVY_BUILD_TIMEOUT)) ||
       die "setup did not finish within $((ROUVY_BUILD_TIMEOUT / 60)) minutes, look at $SCREEN_URL (it keeps running)"
@@ -635,12 +665,13 @@ cmd_build() {
   done
   kill "$logs_pid" 2>/dev/null || true
   trap - EXIT
-  rm -f "$stamp"
+  wait_until 60 ssh_ready || die "Windows provisioning finished but SSH is unavailable, see: $SETUP/last-setup.log"
   sed -n '/^=== /p; /FAILED/p; /^Rouvy/p' "$SETUP/last-setup.log" | tr -d '\r'
 
   # The clock setting made during setup only applies from the next boot.
   info "Shutting Windows down to finish..."
   docker stop "$CONTAINER" >/dev/null
+  rm -f "$stamp"
   info "Done. Start riding with: rouvy"
 }
 

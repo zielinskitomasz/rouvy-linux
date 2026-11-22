@@ -102,6 +102,39 @@ EOF
   refute_called "compose .* up"
 }
 
+@test "an SSH failure stops the VM started by this invocation and returns Bluetooth" {
+  vm_built
+  intel_adapter
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_sh 'wait_until() { shift; "$@"; }; cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  assert_order "device_add" "ssh hostname" "docker stop"
+  [ "$(cat "$STUB_STATE/running")" = false ]
+  [[ $(readlink "$STUB_STATE/sys/3-4/3-4:1.0/driver") == */btusb ]]
+}
+
+@test "an SSH failure detaches Bluetooth acquired by this start on an already running VM" {
+  vm_built
+  vm_running
+  intel_adapter
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_sh 'wait_until() { shift; "$@"; }; cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  assert_order "device_add" "ssh hostname" "device_del"
+  refute_called "docker stop"
+}
+
+@test "an SSH failure preserves Bluetooth already attached to a running VM" {
+  vm_built
+  vm_running
+  intel_adapter usbfs
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_sh 'wait_until() { shift; "$@"; }; cmd_start --no-view'
+  [ "$status" -eq 1 ]
+  refute_called "device_del"
+  refute_called "docker stop"
+}
+
 @test "start rejects options it does not know" {
   vm_built
   run rouvy start --fast
@@ -281,6 +314,25 @@ EOF
   run rouvy build
   [ "$status" -eq 0 ]
   [ ! -e "$REPO/shared/setup/.build-started" ]
+}
+
+@test "build reports a guest installer failure and preserves the retry stamp" {
+  provisioning_succeeds
+  sed -i 's/=== Done/=== Provisioning failed/' "$STUB_STATE/on-up"
+  run rouvy build
+  [ "$status" -eq 1 ]
+  [[ $output == *"Windows provisioning failed"* ]]
+  [ -e "$REPO/shared/setup/.build-started" ]
+}
+
+@test "build keeps its retry stamp if Windows provisioning reports success but SSH fails" {
+  provisioning_succeeds
+  echo down >"$STUB_STATE/ssh"
+  run rouvy_sh 'wait_until() { shift; "$@"; }; cmd_build'
+  [ "$status" -eq 1 ]
+  [[ $output == *"SSH is unavailable"* ]]
+  [ -e "$REPO/shared/setup/.build-started" ]
+  refute_called "docker stop"
 }
 
 @test "build stops waiting when the VM dies during the installation" {
