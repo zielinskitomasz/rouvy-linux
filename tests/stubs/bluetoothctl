@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake bluetoothctl: $STUB_STATE/bluetooth holds one "MAC|name|yes or no" line per paired device,
+# the last field saying whether it is connected.
+echo "bluetoothctl $*" >>"$STUB_STATE/calls"
+devices=$STUB_STATE/bluetooth
+[[ -f $devices ]] || exit 0
+case ${1:-} in
+  devices)
+    while IFS='|' read -r mac name _; do echo "Device $mac $name"; done <"$devices"
+    ;;
+  info)
+    while IFS='|' read -r mac name connected; do
+      if [[ $mac == "$2" ]]; then
+        printf 'Device %s (public)\n\tName: %s\n\tPaired: yes\n\tConnected: %s\n' "$mac" "$name" "$connected"
+      fi
+    done <"$devices"
+    ;;
+  disconnect) sed -i "s/^$2|\\(.*\\)|yes\$/$2|\\1|no/" "$devices" ;;
+esac

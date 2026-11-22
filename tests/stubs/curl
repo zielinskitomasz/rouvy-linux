@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake curl: $STUB_STATE/curl says what the server does (ok, notmodified or fail).
+echo "curl $*" >>"$STUB_STATE/calls"
+out=""
+while (($#)); do
+  if [[ $1 == -o ]]; then out=$2; fi
+  shift
+done
+case $(cat "$STUB_STATE/curl" 2>/dev/null) in
+  fail) exit 22 ;;
+  notmodified) ;;
+  *) echo "downloaded payload" >"$out" ;;
+esac

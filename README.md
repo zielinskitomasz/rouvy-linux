@@ -1,5 +1,7 @@
 # Rouvy on Linux
 
+[![CI](https://github.com/zielinskitomasz/rouvy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/zielinskitomasz/rouvy-linux/actions/workflows/ci.yml)
+
 [ROUVY](https://rouvy.com) has no Linux version. This project runs the Windows app in a Windows 11
 virtual machine and hands that VM your Bluetooth adapter, so Rouvy talks to the smart trainer the
 same way it does on a real Windows PC. One command starts everything:
@@ -120,6 +122,11 @@ the same names win over the file.
 
 - While the VM owns the adapter, Linux has no Bluetooth: mice, keyboards and headphones connected
   through it drop off until `rouvy stop` (or `rouvy bt detach`).
+- A device that loses its link abruptly keeps calling the adapter. Windows then answers under the
+  same Bluetooth address but without the device's keys, and some devices react by dropping the
+  pairing, so they have to be paired with Linux again (seen with a headset). To make that less
+  likely `rouvy` disconnects everything from Linux cleanly before the hand-over; switching such
+  devices off before a ride, or giving the VM a dongle of its own (see below), is the safe choice.
 - QEMU only sees USB devices that existed when the VM started, and the adapter re-enumerates
   every time it changes owner. So after `rouvy bt detach` it can only be attached again by
   restarting the VM: `rouvy stop && rouvy`.
@@ -198,6 +205,23 @@ Restart the VM: `rouvy stop && rouvy`.
 **"Windows did not come up".** Look at the screen at http://127.0.0.1:8006 and at `rouvy logs`.
 Windows may be installing updates.
 
+## Tests
+
+```bash
+bats tests                              # launcher and installer against fake docker, ssh and USB devices
+python3 -m unittest discover -s tests   # QEMU monitor client against a fake monitor
+tests/smoke.sh                          # the real VM: Windows, Bluetooth, Rouvy and the idle inhibitor
+```
+
+The first two need only bats (1.2 or newer) and Python 3. They never touch Docker, the VM or
+Bluetooth, and CI runs them on Ubuntu 20.04, 22.04, 24.04, 26.04 and the latest release, because
+bash, coreutils and util-linux differ between those.
+
+`tests/smoke.sh` is for your own machine. It needs a built VM that is stopped, takes about a
+minute and borrows the Bluetooth adapter, unless something is connected to the adapter on the
+Linux side. The PowerShell scripts only run on Windows: CI just parses them, the smoke test is
+what really exercises them.
+
 ## Rebuilding and removing
 
 To reinstall Windows from scratch, run `rouvy stop`, delete the `storage/` directory and run
@@ -216,9 +240,14 @@ the image with `docker rmi dockurr/windows:6.05`.
 
 ## Tested with
 
-Ubuntu 26.04 (GNOME on Wayland), Docker 29, an Intel Core Ultra 7 155H laptop with its built-in
-Intel AX211 Bluetooth adapter, Windows 11 Pro 25H2 and Rouvy 4.8.4. Other desktops, adapters and
-viewers should work but have not been tried.
+The machine that runs the VM is an Intel Core Ultra 7 155H laptop with Ubuntu 26.04 (GNOME on
+Wayland), Docker 29 and the built-in Intel AX211 Bluetooth adapter; the VM is Windows 11 Pro 25H2
+with Rouvy 4.8.4.
+
+The launcher has also driven that same VM from Ubuntu 20.04, 22.04, 24.04, 25.10 and 26.10
+userlands, with their own bash, coreutils, docker client (26 to 29), Compose (2.27 to 2.40) and
+OpenSSH (8.2 to 10.5). Other desktops, Bluetooth adapters and viewers should work but have not
+been tried.
 
 ## Licence and credits
 

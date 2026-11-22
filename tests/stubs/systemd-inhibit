@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake systemd-inhibit: holds for as long as the wrapped command runs.
+echo "systemd-inhibit $*" >>"$STUB_STATE/calls"
+while [[ ${1:-} == --* ]]; do shift; done
+exec "$@"

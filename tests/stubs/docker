@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Fake docker. Its state is a handful of files in $STUB_STATE (see tests/helper.bash).
+echo "docker $*" >>"$STUB_STATE/calls"
+
+# Mirrors what QEMU does to the adapter: the driver bound to the fake USB interface changes.
+set_owner() {
+  local intf
+  for intf in "$STUB_STATE"/sys/*/*:1.0; do
+    [[ -d $intf ]] || continue
+    ln -sfn "../../drivers/$1" "$intf/driver"
+  done
+}
+
+owner() {
+  local link
+  link=$(readlink "$STUB_STATE"/sys/*/*:1.0/driver 2>/dev/null | head -1) || return 0
+  basename "$link"
+}
+
+case ${1:-} in
+  info) if [[ $(cat "$STUB_STATE/docker" 2>/dev/null) == down ]]; then exit 1; fi ;;
+  compose)
+    case " $* " in
+      *" version "*) echo "Docker Compose version v2.stub" ;;
+      *" up "*)
+        echo true >"$STUB_STATE/running"
+        if [[ -x $STUB_STATE/on-up ]]; then "$STUB_STATE/on-up"; fi
+        ;;
+    esac
+    ;;
+  inspect) cat "$STUB_STATE/running" 2>/dev/null || exit 1 ;;
+  ps) if [[ $(cat "$STUB_STATE/running" 2>/dev/null) == true ]]; then echo "Up 5 seconds"; fi ;;
+  stop)
+    echo false >"$STUB_STATE/running"
+    set_owner btusb
+    ;;
+  cp) : >"${*: -1}" ;;
+  exec)
+    shift
+    while [[ ${1:-} == -* ]]; do shift; done
+    shift
+    case "${1:-} ${2:-}" in
+      "test -S") ;;
+      "cat /run/shm/msg.html") echo "<p>Downloading Windows 11 (50.0%)</p>" ;;
+      "python3 -")
+        shift 2
+        case ${1:-} in
+          vnc-clients) cat "$STUB_STATE/viewers" 2>/dev/null || exit 1 ;;
+          screendump) ;;
+          hmp)
+            shift
+            case "$*" in
+              "info usb") if [[ $(owner) == usbfs ]]; then echo "  Device 0.2, Port 2, Speed 12 Mb/s, Product host:3.5, ID: bt0"; fi ;;
+              device_add*) if [[ $(cat "$STUB_STATE/attach" 2>/dev/null) != broken ]]; then set_owner usbfs; fi ;;
+              device_del*) set_owner btusb ;;
+              *) echo "reply to: $*" ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+esac

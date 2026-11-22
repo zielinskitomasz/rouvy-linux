@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake ssh-keygen: creates the key pair files named by -f.
+echo "ssh-keygen $*" >>"$STUB_STATE/calls"
+while (($#)); do
+  if [[ $1 == -f ]]; then
+    echo "private key" >"$2"
+    echo "ssh-ed25519 AAAAstub rouvy-vm" >"$2.pub"
+  fi
+  shift
+done

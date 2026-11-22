@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fake ssh into the VM. Only the remote command matters; it is everything after the host.
+remote=()
+for ((i = 1; i <= $#; i++)); do
+  if [[ ${!i} == rouvy@127.0.0.1 ]]; then remote=("${@:i+1}"); fi
+done
+cmd=${remote[*]}
+echo "ssh $cmd" >>"$STUB_STATE/calls"
+
+if [[ $(cat "$STUB_STATE/ssh" 2>/dev/null) == down ]]; then exit 255; fi
+
+case $cmd in
+  hostname) echo WIN-STUB ;;
+  *"'ROUVY=1'"*) cat "$STUB_STATE/probe" 2>/dev/null || exit 255 ;;
+  powershell*-File*)
+    script=$(sed -n "s/.*setup\\\\\([a-z-]*\.ps1\)'.*/\1/p" <<<"$cmd")
+    cat "$STUB_STATE/ps1/$script.out" 2>/dev/null
+    if [[ -x $STUB_STATE/ps1/$script.hook ]]; then "$STUB_STATE/ps1/$script.hook"; fi
+    # One exit code per call: the first line of the .rc file is consumed each time.
+    rc_file=$STUB_STATE/ps1/$script.rc
+    if [[ -s $rc_file ]]; then
+      rc=$(head -1 "$rc_file")
+      sed -i 1d "$rc_file"
+      exit "$rc"
+    fi
+    ;;
+  *) echo "ran: $cmd" ;;
+esac
