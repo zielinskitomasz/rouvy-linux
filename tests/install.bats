@@ -82,12 +82,36 @@ teardown() { teardown_sandbox; }
 }
 
 @test "install and uninstall preserve another checkout's launcher" {
-  mkdir -p "$(dirname "$LAUNCHER")"
-  echo 'Exec="/other/rouvy" start' >"$LAUNCHER"
+  mkdir -p "$(dirname "$LAUNCHER")" "$SANDBOX/other"
+  : >"$SANDBOX/other/rouvy"
+  echo "Exec=\"$SANDBOX/other/rouvy\" start" >"$LAUNCHER"
   run "$REPO/install.sh"
   [ "$status" -eq 1 ]
   [ ! -e "$XDG_BIN_HOME/rouvy" ]
   run "$REPO/install.sh" --uninstall
   [ "$status" -eq 0 ]
-  grep -Fxq 'Exec="/other/rouvy" start' "$LAUNCHER"
+  [[ $output == *"Left alone"*"$LAUNCHER"* ]]
+  grep -Fxq "Exec=\"$SANDBOX/other/rouvy\" start" "$LAUNCHER"
+}
+
+@test "install.sh from a moved checkout repairs the link and the launcher it left behind" {
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  mv "$REPO" "$SANDBOX/moved"
+  REPO=$SANDBOX/moved
+  run "$REPO/install.sh"
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$XDG_BIN_HOME/rouvy")" = "$REPO/rouvy" ]
+  grep -qxF "Exec=\"$REPO/rouvy\" start" "$LAUNCHER"
+}
+
+@test "install.sh --uninstall from a moved checkout removes what it left behind" {
+  run "$REPO/install.sh"
+  mv "$REPO" "$SANDBOX/moved"
+  REPO=$SANDBOX/moved
+  run "$REPO/install.sh" --uninstall
+  [ "$status" -eq 0 ]
+  [[ $output != *"Left alone"* ]]
+  [ ! -L "$XDG_BIN_HOME/rouvy" ]
+  [ ! -e "$LAUNCHER" ]
 }

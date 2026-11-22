@@ -524,15 +524,9 @@ cmd_start() {
 
   info "Waiting for Windows..."
   if ! wait_until 240 ssh_ready; then
-    if ((started_vm)); then
-      if container_running; then docker stop "$CONTAINER" >/dev/null || warn "could not stop the VM"; fi
-      if ((BT_ATTACH_REQUESTED)) && ! wait_until 10 bt_with_linux; then
-        warn "Bluetooth did not return to Linux: $(bt_name) belongs to $(bt_owner_label)"
-      fi
-    elif ((BT_ATTACH_REQUESTED)) && bt_owned_by usbfs; then
-      bt_release || true
-    fi
-    die "Windows did not answer over SSH. See: rouvy logs"
+    # Windows is most often just busy with updates, so it keeps running: only the adapter goes back.
+    if ((BT_ATTACH_REQUESTED)) && bt_owned_by usbfs; then bt_release || true; fi
+    die "Windows is not answering over SSH yet, look at $SCREEN_URL and once it is idle run: rouvy stop && rouvy"
   fi
   if ((have_bt)); then bt_driver || warn "Bluetooth is not working inside Windows, see: rouvy bt check"; fi
   if ((launch)); then launch_rouvy || warn "could not start Rouvy, open the screen and start it by hand"; fi
@@ -602,9 +596,10 @@ cmd_status() {
 
 # --- build and update ------------------------------------------------------------------------
 
+# Windows appends to its transcript, so only the last marker speaks for the latest run.
 provisioned_since() {
   [[ -f $SETUP/last-setup.log && $SETUP/last-setup.log -nt $1 ]] &&
-    grep -q "^=== $2 " "$SETUP/last-setup.log"
+    [[ $(grep -a '^=== ' "$SETUP/last-setup.log" | tail -n 1) == "=== $2 "* ]]
 }
 
 # The message dockur shows on its web page, e.g. "Downloading Windows 11 (29.0%)".
@@ -634,6 +629,10 @@ cmd_build() {
   info "Downloading the Rouvy installer..."
   fetch "$ROUVY_INSTALLER_URL" "$SETUP/rouvy/Rouvy_Installer.exe" || die "download failed: $ROUVY_INSTALLER_URL"
 
+  # Without a container or an installed Windows this build starts from nothing, and what an
+  # earlier attempt left behind says nothing about it. dockur only writes windows.boot when the
+  # container stops, hence both conditions: an interrupted build whose VM still runs keeps its log.
+  if ! vm_installed && ! container_running; then rm -f "$stamp" "$SETUP/last-setup.log"; fi
   [[ -f $stamp ]] || touch "$stamp"
   info "Installing Windows 11. This downloads about 8.5 GB and takes half an hour or more."
   info "You can watch it at $SCREEN_URL"
@@ -644,7 +643,7 @@ cmd_build() {
   local started=$SECONDS next=0 said=$SECONDS status last=""
   until provisioned_since "$stamp" Done; do
     if provisioned_since "$stamp" 'Provisioning failed'; then
-      die "Windows provisioning failed, see: $SETUP/last-setup.log"
+      die "Windows is installed, but installing Rouvy in it failed, see: $SETUP/last-setup.log. Fix the cause, then run: rouvy update"
     fi
     container_running || die "the VM stopped during the installation, see: docker logs $CONTAINER"
     ((SECONDS - started < ROUVY_BUILD_TIMEOUT)) ||

@@ -12,19 +12,31 @@ owns_command() { [[ -L $COMMAND && $(readlink "$COMMAND") == "$ROOT/rouvy" ]]; }
 owns_launcher() {
   [[ ! -L $LAUNCHER && -f $LAUNCHER ]] && grep -Fxq "Exec=\"$ROOT/rouvy\" start" "$LAUNCHER"
 }
+# What a checkout that was moved or deleted left behind points at nothing and is nobody's.
+stale_command() { [[ -L $COMMAND && ! -e $COMMAND && $(readlink "$COMMAND") == */rouvy ]]; }
+stale_launcher() {
+  local target
+  [[ ! -L $LAUNCHER && -f $LAUNCHER ]] || return 1
+  target=$(sed -n 's/^Exec="\(.*\/rouvy\)" start$/\1/p' "$LAUNCHER")
+  [[ -n $target && ! -e $target ]]
+}
 
 if [[ ${1:-} == --uninstall ]]; then
-  if owns_command; then rm -- "$COMMAND"; fi
-  if owns_launcher; then rm -- "$LAUNCHER"; fi
+  if owns_command || stale_command; then rm -- "$COMMAND"; fi
+  if owns_launcher || stale_launcher; then rm -- "$LAUNCHER"; fi
+  for left in "$COMMAND" "$LAUNCHER"; do
+    if [[ -e $left || -L $left ]]; then echo "Left alone, it does not belong to $ROOT: $left"; fi
+  done
   echo "Uninstall complete for $ROOT. The VM is untouched."
   exit 0
 fi
 
-if [[ -e $LAUNCHER || -L $LAUNCHER ]] && ! owns_launcher; then
+if [[ -e $LAUNCHER || -L $LAUNCHER ]] && ! owns_launcher && ! stale_launcher; then
   echo "error: $LAUNCHER already exists and belongs to another installation" >&2
   exit 1
 fi
 mkdir -p "$BIN" "$APPS"
+if stale_command; then rm -- "$COMMAND"; fi
 if ! owns_command; then
   ln -sT -- "$ROOT/rouvy" "$COMMAND" || {
     echo "error: could not install $COMMAND" >&2

@@ -157,7 +157,7 @@ teardown() { teardown_sandbox; }
 @test "bt detach fails if the adapter does not return to Linux" {
   intel_adapter usbfs
   vm_running
-  run rouvy_sh 'wait_until() { shift; "$@"; }; monitor() { return 1; }; cmd_bt detach'
+  run rouvy_once 'monitor() { return 1; }; cmd_bt detach'
   [ "$status" -eq 1 ]
   [[ $output == *"Bluetooth did not return to Linux"* ]]
   [[ $output == *"belongs to the VM"* ]]

@@ -58,6 +58,9 @@ rouvy() { "$REPO/rouvy" "$@" 3>&-; }
 # Runs a snippet with the launcher's functions loaded and its shell options in force.
 rouvy_sh() { bash -c "source '$REPO/rouvy'; $1" 3>&-; }
 
+# Like rouvy_sh, with every wait_until cut down to one attempt so failure paths do not sleep.
+rouvy_once() { rouvy_sh "wait_until() { shift; \"\$@\"; }; $1"; }
+
 # add_usb_device <port> <vendor> <product> <bluetooth|other> [driver]
 add_usb_device() {
   local dev=$STUB_STATE/sys/$1 intf=$STUB_STATE/sys/$1/$1:1.0
