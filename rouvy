@@ -42,6 +42,8 @@ readonly CONTAINER=$ROUVY_NAME-windows
 # The settings below exist for the test suite: fake devices and a faster watcher.
 readonly USB_SYSFS=${ROUVY_USB_SYSFS:-/sys/bus/usb/devices}
 readonly KVM_DEVICE=${ROUVY_KVM_DEVICE:-/dev/kvm}
+readonly TUN_DEVICE=${ROUVY_TUN_DEVICE:-/dev/net/tun}
+readonly SELINUX_FS=${ROUVY_SELINUX_FS:-/sys/fs/selinux}
 readonly WATCH_INTERVAL=${ROUVY_WATCH_INTERVAL:-20}
 readonly SETUP=$ROOT/shared/setup
 readonly RUN_DIR=${XDG_RUNTIME_DIR:-/tmp}/rouvy-$ROUVY_NAME
@@ -63,7 +65,7 @@ Usage: rouvy [command]
   stop              Shut Windows down. Bluetooth returns to Linux.
   status            VM, Bluetooth, Rouvy and screen blanking state.
   view              Open the VM screen again.
-  build             First-time setup: install Windows and Rouvy unattended (about 20 minutes).
+  build             First-time setup: install Windows and Rouvy unattended (about half an hour).
   update [--force]  Install the latest Rouvy release inside the VM.
   bt attach|detach|check|driver [--force]
                     Move the Bluetooth adapter, list what Windows sees, install its driver.
@@ -105,6 +107,15 @@ compose() {
   local settings=/dev/null
   if [[ -f $CONF ]]; then settings=$CONF; fi
   docker compose --project-directory "$ROOT" -f "$ROOT/compose.yaml" --env-file "$settings" "$@"
+}
+
+# Where tun is a kernel module, the first open of its device loads it. The VM's container may not
+# trigger that itself on SELinux hosts and would fall back to a network without port forwards.
+tun_ready() { { : <"$TUN_DEVICE"; } 2>/dev/null; }
+
+vm_up() {
+  tun_ready || true
+  compose up -d
 }
 
 container_running() {
@@ -187,7 +198,7 @@ bt_name() {
   echo "${name:-USB Bluetooth adapter} ($BT_VID:$BT_PID)"
 }
 
-# btusb = Linux owns the adapter, usbfs = QEMU (the VM) owns it.
+# usbfs = QEMU (the VM) owns the adapter, any other driver (btusb as a rule) = Linux does.
 bt_owner() {
   local link
   link=$(readlink "$BT_DEV/${BT_DEV##*/}:1.0/driver" 2>/dev/null) || {
@@ -198,6 +209,20 @@ bt_owner() {
 }
 
 bt_owned_by() { [[ $(bt_owner) == "$1" ]]; }
+
+# shellcheck disable=SC2317,SC2329  # called through wait_until
+bt_with_linux() {
+  local owner
+  owner=$(bt_owner)
+  [[ $owner != usbfs && $owner != none ]]
+}
+
+# With SELinux enforcing, a container may only open device nodes when this policy switch is on.
+selinux_blocks_usb() {
+  [[ $(cat "$SELINUX_FS/enforce" 2>/dev/null) == 1 ]] || return 1
+  [[ $(cat "$SELINUX_FS/booleans/container_use_devices" 2>/dev/null) == 0* ]] || return 1
+  [[ $(docker info --format '{{.SecurityOptions}}' 2>/dev/null) == *name=selinux* ]]
+}
 
 # Prints "MAC name" for every device that is connected to Linux over Bluetooth right now.
 bt_host_connections() {
@@ -231,9 +256,14 @@ bt_attach() {
   fi
   monitor hmp device_add "usb-host,vendorid=0x$BT_VID,productid=0x$BT_PID,id=bt0" >/dev/null
   if ! wait_until 10 bt_owned_by usbfs; then
-    # QEMU only knows the USB devices that existed when it started and the adapter
-    # re-enumerates every time it changes owner, so a second attach needs a fresh VM.
-    warn "QEMU cannot see the adapter any more. Restart the VM: rouvy stop && rouvy start"
+    if selinux_blocks_usb; then
+      warn "SELinux blocks USB devices for containers. Allow it once: sudo setsebool -P container_use_devices on"
+      warn "then restart the VM: rouvy stop && rouvy start"
+    else
+      # QEMU only knows the USB devices that existed when it started and the adapter
+      # re-enumerates every time it changes owner, so a second attach needs a fresh VM.
+      warn "QEMU cannot see the adapter any more. Restart the VM: rouvy stop && rouvy start"
+    fi
     return 1
   fi
   info "Bluetooth: $(bt_name) handed to the VM (Linux has no Bluetooth until 'rouvy stop')"
@@ -243,7 +273,7 @@ bt_detach() {
   bt_select || die "no USB Bluetooth adapter found"
   if bt_owned_by usbfs; then
     monitor hmp device_del bt0 >/dev/null
-    wait_until 10 bt_owned_by btusb || warn "the adapter did not come back to Linux yet"
+    wait_until 10 bt_with_linux || warn "the adapter did not come back to Linux yet"
   fi
   info "Bluetooth: $(bt_name) belongs to Linux (attaching it again needs 'rouvy stop && rouvy start')"
 }
@@ -468,7 +498,7 @@ cmd_start() {
     info "The VM is already running"
   else
     notify "Starting the Windows VM..."
-    compose up -d
+    vm_up
   fi
   wait_until 60 monitor_ready || die "the VM did not start, see: rouvy logs"
 
@@ -496,16 +526,16 @@ cmd_stop() {
   fi
   watch_stop
   if bt_select; then
-    wait_until 10 bt_owned_by btusb || true
+    wait_until 10 bt_with_linux || true
     info "Bluetooth: $(bt_name) belongs to $(bt_owner_label)"
   fi
 }
 
 bt_owner_label() {
   case $(bt_owner) in
-    btusb) echo "Linux" ;;
     usbfs) echo "the VM" ;;
-    *) echo "nobody (no driver bound)" ;;
+    none) echo "nobody (no driver bound)" ;;
+    *) echo "Linux" ;;
   esac
 }
 
@@ -578,9 +608,9 @@ cmd_build() {
   fetch "$ROUVY_INSTALLER_URL" "$SETUP/rouvy/Rouvy_Installer.exe" || die "download failed: $ROUVY_INSTALLER_URL"
 
   [[ -f $stamp ]] || touch "$stamp"
-  info "Installing Windows 11. This downloads about 8.5 GB and takes 20 minutes or more."
+  info "Installing Windows 11. This downloads about 8.5 GB and takes half an hour or more."
   info "You can watch it at $SCREEN_URL"
-  compose up -d
+  vm_up
   docker logs -f --since 1s "$CONTAINER" > >(tr '\r' '\n' | grep --line-buffered -v '^[[:space:]]*$') 2>&1 &
   logs_pid=$!
   trap 'kill "$logs_pid" 2>/dev/null || true' EXIT
@@ -642,9 +672,9 @@ cmd_doctor() {
     if [[ $1 == fail ]]; then failed=1; fi
   }
   if docker info >/dev/null 2>&1; then check ok "docker daemon reachable"; else check fail "docker daemon not reachable (installed? in the docker group?)"; fi
-  if docker compose version >/dev/null 2>&1; then check ok "docker compose v2"; else check fail "docker compose v2 plugin missing"; fi
+  if docker compose version >/dev/null 2>&1; then check ok "docker compose plugin"; else check fail "docker compose plugin missing (the 'docker compose' command)"; fi
   if [[ -c $KVM_DEVICE ]]; then check ok "/dev/kvm present"; else check fail "/dev/kvm missing (enable VT-x/AMD-V in the firmware setup)"; fi
-  if [[ -c /dev/net/tun ]]; then check ok "/dev/net/tun present"; else check fail "/dev/net/tun missing (modprobe tun)"; fi
+  if [[ -c $TUN_DEVICE ]] && tun_ready; then check ok "/dev/net/tun usable"; else check fail "/dev/net/tun missing or not usable (sudo modprobe tun)"; fi
   for tool in ssh ssh-keygen curl setsid flock timeout; do
     if command -v "$tool" >/dev/null; then check ok "$tool"; else check fail "$tool not installed"; fi
   done
@@ -665,6 +695,9 @@ cmd_doctor() {
   fi
   if bt_select; then
     check ok "Bluetooth: $(bt_name), owned by $(bt_owner_label)"
+    if selinux_blocks_usb; then
+      check warn "SELinux blocks USB devices for containers, the VM would not get Bluetooth. Allow it: sudo setsebool -P container_use_devices on"
+    fi
   elif [[ $ROUVY_BT == off ]]; then
     check warn "Bluetooth switched off (ROUVY_BT=off), BLE trainers will not connect"
   else

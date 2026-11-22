@@ -19,6 +19,9 @@ services:
       CPU_CORES: ${ROUVY_CPUS:-8}
       DISK_SIZE: ${ROUVY_DISK:-64G}
       AUDIO: ${ROUVY_AUDIO:-Y}
+      # Where the container cannot set up NAT (seen on openSUSE with SELinux) it falls back to
+      # user-mode networking, which only passes the ports named here on to Windows.
+      USER_PORTS: "22"
     devices:
       - /dev/kvm
       - /dev/net/tun
@@ -33,10 +36,12 @@ services:
       - "127.0.0.1:${ROUVY_RDP_PORT:-3389}:3389/tcp"
       - "127.0.0.1:${ROUVY_RDP_PORT:-3389}:3389/udp"
       - "127.0.0.1:${ROUVY_SSH_PORT:-2222}:22"
+    # The Z suffix relabels a folder for this container on SELinux hosts (Fedora, openSUSE) and
+    # does nothing anywhere else. Device nodes must never get one.
     volumes:
-      - ./storage:/storage
-      - ./shared:/data
-      - ./oem:/oem
+      - ./storage:/storage:Z
+      - ./shared:/data:Z
+      - ./oem:/oem:Z
       - /dev/bus/usb:/dev/bus/usb
     restart: "no"
     stop_grace_period: 2m

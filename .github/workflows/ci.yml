@@ -18,7 +18,7 @@ jobs:
         run: shellcheck -x rouvy install.sh tests/smoke.sh tests/helper.bash tests/stubs/*
 
       - name: Python
-        run: python3 -m py_compile lib/vm-monitor.py tests/test_vm_monitor.py
+        run: python3 -m py_compile lib/vm-monitor.py tests/test_vm_monitor.py tests/test_docs.py
 
       - name: PowerShell scripts parse
         shell: pwsh
@@ -34,24 +34,42 @@ jobs:
       - name: Compose file
         run: docker compose --env-file rouvy.conf.example config --quiet
 
-  # The launcher leans on bash, coreutils and util-linux, which differ between releases (GNU
-  # coreutils up to 24.04, the Rust rewrite after it), so the suites run on each of them with
-  # that release's own bats. "rolling" is whatever Ubuntu released last.
+  # The launcher leans on bash, coreutils and util-linux, which differ between distributions and
+  # releases (GNU coreutils or the Rust rewrite, bash 5.0 to 5.3), so the suites run in each
+  # one's own userland with its own bats. "rolling" is whatever Ubuntu released last.
   test:
-    name: test (ubuntu ${{ matrix.ubuntu }})
+    name: test (${{ matrix.image }})
     runs-on: ubuntu-latest
-    container: ubuntu:${{ matrix.ubuntu }}
+    container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: ["20.04", "22.04", "24.04", "26.04", "rolling"]
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - ubuntu:rolling
+          - debian:12
+          - debian:13
+          - archlinux:latest
+          - fedora:latest
+          - opensuse/tumbleweed:latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Install the test tools
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends bats python3 procps desktop-file-utils
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends bats python3 procps desktop-file-utils
+          elif command -v pacman >/dev/null; then
+            pacman -Syu --noconfirm --needed bats python procps-ng desktop-file-utils
+          elif command -v dnf >/dev/null; then
+            dnf install -y bats python3 procps-ng desktop-file-utils
+          else
+            zypper --non-interactive install bats python3 procps desktop-file-utils
+          fi
 
       - name: Launcher and installer
         run: bats tests

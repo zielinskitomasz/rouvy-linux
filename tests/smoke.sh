@@ -59,7 +59,7 @@ gnome_idle_inhibited() {
 windows_parses_the_scripts() {
   local errors
   # shellcheck disable=SC2016  # the dollar signs belong to PowerShell
-  errors=$(vm_ssh 'Get-ChildItem \\host.lan\Data\setup\*.ps1 | ForEach-Object { $e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e); if ($e) { $_.Name } }')
+  errors=$(vm_ssh 'Get-ChildItem \\host.lan\Data\setup\*.ps1 | ForEach-Object { $e = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e); if ($e) { $_.Name } }') || return 1
   [[ -z ${errors//[[:space:]]/} ]]
 }
 clocks_agree() {
@@ -117,7 +117,7 @@ check "rouvy screenshot writes a PNG" is_png "$screenshot"
 check "rouvy stop shuts the VM down" "$ROOT/rouvy" stop
 check "the VM container is stopped" vm_is_down
 check "the watcher is gone" test ! -e "$RUN_DIR/watch.pid"
-if ((test_bluetooth)); then check "Bluetooth is back with Linux" bt_owned_by btusb; fi
+if ((test_bluetooth)); then check "Bluetooth is back with Linux" bt_with_linux; fi
 
 if ((failures)); then
   echo "$failures check(s) failed"
