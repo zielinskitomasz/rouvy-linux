@@ -59,6 +59,22 @@ teardown() { teardown_sandbox; }
   [ "${lines[1]}" = "nobody (no driver bound)" ]
 }
 
+@test "bluetooth: an adapter held by any other Linux driver belongs to Linux" {
+  add_usb_device 1-1 0a12 0001 bluetooth bfusb
+  run rouvy_sh 'bt_select; bt_owner_label; bt_with_linux && echo back'
+  [ "${lines[0]}" = "Linux" ]
+  [ "${lines[1]}" = back ]
+}
+
+@test "bluetooth: an adapter is not back with Linux while the VM holds it or no driver does" {
+  intel_adapter usbfs
+  run rouvy_sh 'bt_select; bt_with_linux'
+  [ "$status" -eq 1 ]
+  rm "$STUB_STATE/sys/3-4/3-4:1.0/driver"
+  run rouvy_sh 'bt_select; bt_with_linux'
+  [ "$status" -eq 1 ]
+}
+
 @test "bluetooth: the adapter is named from sysfs, or from lsusb when sysfs has no name" {
   intel_adapter
   run rouvy_sh 'bt_select; bt_name'
@@ -105,6 +121,28 @@ teardown() { teardown_sandbox; }
   run rouvy bt attach
   [ "$status" -eq 1 ]
   [[ $output == *"rouvy stop && rouvy start"* ]]
+}
+
+@test "bt attach names SELinux when that is what keeps QEMU from the adapter" {
+  intel_adapter
+  vm_running
+  echo broken >"$STUB_STATE/attach"
+  selinux_enforcing 0
+  run rouvy bt attach
+  [ "$status" -eq 1 ]
+  [[ $output == *"sudo setsebool -P container_use_devices on"* ]]
+  [[ $output != *"QEMU cannot see the adapter"* ]]
+}
+
+@test "bt attach does not blame SELinux once it lets containers use devices" {
+  intel_adapter
+  vm_running
+  echo broken >"$STUB_STATE/attach"
+  selinux_enforcing 1
+  run rouvy bt attach
+  [ "$status" -eq 1 ]
+  [[ $output == *"QEMU cannot see the adapter"* ]]
+  [[ $output != *"setsebool"* ]]
 }
 
 @test "bt detach gives the adapter back to Linux" {

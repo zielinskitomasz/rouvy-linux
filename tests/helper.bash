@@ -9,6 +9,7 @@
 #   ps1/<name>.out, .rc, .hook   output, exit codes (one per call) and side effect of a
 #                 PowerShell script run in the VM
 #   bluetooth     paired devices of the host, see the bluetoothctl stub
+#   selinux/      a fake /sys/fs/selinux, see selinux_enforcing (missing: no SELinux)
 #   attach, curl, docker, gnome, ssh   failure switches, see the stubs
 
 setup_sandbox() {
@@ -30,6 +31,8 @@ setup_sandbox() {
   export XDG_RUNTIME_DIR=$SANDBOX/run
   export ROUVY_USB_SYSFS=$STUB_STATE/sys
   export ROUVY_KVM_DEVICE=/dev/null
+  export ROUVY_TUN_DEVICE=/dev/null
+  export ROUVY_SELINUX_FS=$STUB_STATE/selinux
   export ROUVY_WATCH_INTERVAL=1
   # shellcheck disable=SC2034  # read by the suites
   RUN_DIR=$XDG_RUNTIME_DIR/rouvy-rouvy
@@ -74,6 +77,13 @@ add_usb_device() {
 }
 
 intel_adapter() { add_usb_device 3-4 8087 0033 bluetooth "${1:-btusb}"; }
+
+# selinux_enforcing <0|1>: SELinux is enforcing, with this value of container_use_devices
+selinux_enforcing() {
+  mkdir -p "$STUB_STATE/selinux/booleans"
+  echo 1 >"$STUB_STATE/selinux/enforce"
+  echo "$1 $1" >"$STUB_STATE/selinux/booleans/container_use_devices"
+}
 
 vm_built() {
   mkdir -p "$REPO/storage" "$REPO/ssh"

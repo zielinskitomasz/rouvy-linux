@@ -50,6 +50,13 @@ EOF
   assert_called "rouvy-launch\.ps1"
 }
 
+@test "start still brings the VM up when the tun device cannot be opened" {
+  vm_built
+  ROUVY_TUN_DEVICE=$SANDBOX/no-tun run rouvy start --no-bt --no-view
+  [ "$status" -eq 0 ]
+  assert_called "docker compose .* up -d"
+}
+
 @test "start with ROUVY_BT=off leaves Bluetooth alone without a warning" {
   intel_adapter
   vm_built
@@ -365,6 +372,24 @@ EOF
   [[ $output == *"ok    docker daemon reachable"* ]]
   [[ $output == *"ok    Bluetooth: Intel Corp. AX211 Bluetooth (8087:0033), owned by Linux"* ]]
   [[ $output == *"ok    screen blanking inhibitor: gnome-session-inhibit"* ]]
+}
+
+@test "doctor says so when SELinux would keep the adapter out of the VM" {
+  intel_adapter
+  run rouvy doctor
+  [[ $output != *"SELinux"* ]]
+  selinux_enforcing 0
+  run rouvy doctor
+  [[ $output == *"warn  SELinux blocks USB devices for containers"*"sudo setsebool -P container_use_devices on"* ]]
+  selinux_enforcing 1
+  run rouvy doctor
+  [[ $output != *"SELinux"* ]]
+}
+
+@test "doctor fails when the tun device cannot be opened" {
+  ROUVY_TUN_DEVICE=$SANDBOX/no-tun run rouvy doctor
+  [ "$status" -eq 1 ]
+  [[ $output == *"fail  /dev/net/tun missing or not usable"* ]]
 }
 
 @test "doctor fails without KVM" {

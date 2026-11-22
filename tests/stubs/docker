@@ -18,7 +18,12 @@ owner() {
 }
 
 case ${1:-} in
-  info) if [[ $(cat "$STUB_STATE/docker" 2>/dev/null) == down ]]; then exit 1; fi ;;
+  info)
+    if [[ $(cat "$STUB_STATE/docker" 2>/dev/null) == down ]]; then exit 1; fi
+    if [[ $* == *SecurityOptions* ]]; then
+      if [[ -d $STUB_STATE/selinux ]]; then echo "[name=seccomp,profile=builtin name=selinux]"; else echo "[name=apparmor name=seccomp,profile=builtin]"; fi
+    fi
+    ;;
   compose)
     case " $* " in
       *" version "*) echo "Docker Compose version v2.stub" ;;
