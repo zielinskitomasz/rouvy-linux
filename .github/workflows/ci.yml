@@ -18,7 +18,7 @@ jobs:
         run: shellcheck -x rouvy install.sh tests/smoke.sh tests/helper.bash tests/stubs/*
 
       - name: Python
-        run: python3 -m py_compile lib/vm-monitor.py tests/test_vm_monitor.py
+        run: python3 -m py_compile lib/vm-monitor.py tests/test_vm_monitor.py tests/test_docs.py
 
       - name: PowerShell scripts parse
         shell: pwsh
