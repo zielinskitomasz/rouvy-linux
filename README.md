@@ -1,6 +1,6 @@
 # Rouvy on Linux
 
-[![CI](https://github.com/zielinskitomasz/rouvy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/zielinskitomasz/rouvy-linux/actions/workflows/ci.yml)
+[![CI](https://github.com/zieludev/rouvy-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/zieludev/rouvy-linux/actions/workflows/ci.yml)
 
 [ROUVY](https://rouvy.com) has no Linux app. This runs the Windows one in a Windows 11 virtual
 machine and lends that VM your Bluetooth adapter, so the trainer pairs just like on a Windows PC.
@@ -22,7 +22,7 @@ Get Docker and KVM working first, see [What you need](#what-you-need). Clone thi
 can stay, on a disk with 40 GB free: the Windows VM lives inside the checkout.
 
 ```bash
-git clone https://github.com/zielinskitomasz/rouvy-linux.git
+git clone https://github.com/zieludev/rouvy-linux.git
 cd rouvy-linux
 ./install.sh     # links `rouvy` into ~/.local/bin and adds a menu entry
 rouvy doctor     # tells you what this machine is missing, if anything

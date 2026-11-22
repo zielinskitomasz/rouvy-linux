@@ -92,7 +92,7 @@ OpenSSH, talking to the Docker daemon of the host.
 - Podman in place of Docker
 
 If you ride with this on something that is not listed, open an
-[issue](https://github.com/zielinskitomasz/rouvy-linux/issues) and tell me the distribution, the
+[issue](https://github.com/zieludev/rouvy-linux/issues) and tell me the distribution, the
 adapter and the trainer. I will add it here.
 
 ## Contributing

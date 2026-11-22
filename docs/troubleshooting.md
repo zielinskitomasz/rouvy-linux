@@ -96,7 +96,7 @@ watcher writes every change of state to `$XDG_RUNTIME_DIR/rouvy-rouvy/watch.log`
 
 ## Still stuck
 
-Open an [issue](https://github.com/zielinskitomasz/rouvy-linux/issues) and paste the output of
+Open an [issue](https://github.com/zieludev/rouvy-linux/issues) and paste the output of
 `rouvy doctor` and `rouvy status`. If the VM screen shows something odd, a `rouvy screenshot`
 helps a lot, but look at it first: it may show your Rouvy account.
 
